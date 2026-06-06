@@ -85,6 +85,13 @@ const PCBState = (function() {
         return pour;
     }
 
+    function setCopperPourVertex(id, vertexIndex, newPosition) {
+        const pour = state.copperPours.find(p => p.id === id);
+        if (pour && vertexIndex >= 0 && vertexIndex < pour.points.length) {
+            pour.points[vertexIndex] = { x: newPosition.x, y: newPosition.y };
+        }
+    }
+
     function removeCopperPour(id) {
         saveSnapshot();
         const idx = state.copperPours.findIndex(p => p.id === id);
@@ -306,7 +313,6 @@ const PCBState = (function() {
     }
 
     function movePad(padId, newPosition) {
-        saveSnapshot();
         const pad = state.pads.find(p => p.id === padId);
         if (!pad) return;
         const dx = newPosition.x - pad.x;
@@ -326,6 +332,30 @@ const PCBState = (function() {
             if (Geometry.dist(end, { x: pad.x - dx, y: pad.y - dy }) <= tol) {
                 end.x = pad.x;
                 end.y = pad.y;
+            }
+        }
+    }
+
+    function moveVia(viaId, newPosition) {
+        const via = state.vias.find(v => v.id === viaId);
+        if (!via) return;
+        const dx = newPosition.x - via.x;
+        const dy = newPosition.y - via.y;
+        via.x = newPosition.x;
+        via.y = newPosition.y;
+
+        for (const track of state.tracks) {
+            if (track.points.length < 1) continue;
+            const start = track.points[0];
+            const end = track.points[track.points.length - 1];
+            const tol = via.diameter / 2 + 0.1;
+            if (Geometry.dist(start, { x: via.x - dx, y: via.y - dy }) <= tol) {
+                start.x = via.x;
+                start.y = via.y;
+            }
+            if (Geometry.dist(end, { x: via.x - dx, y: via.y - dy }) <= tol) {
+                end.x = via.x;
+                end.y = via.y;
             }
         }
     }
@@ -464,6 +494,8 @@ const PCBState = (function() {
         findCopperPourVertexAt,
         findElementAt,
         movePad,
+        moveVia,
+        setCopperPourVertex,
         getPadsByNet,
         getTracksByNet,
         getViasByNet,

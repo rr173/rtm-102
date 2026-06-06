@@ -380,6 +380,10 @@ const Interaction = (function() {
         else if (pourVertex) target = { type: 'copperPour', element: pourVertex.pour };
         else if (pour) target = { type: 'copperPour', element: pour };
 
+        if ((target && target.type === 'pad') || (target && target.type === 'via') || pourVertex) {
+            PCBState.saveSnapshot();
+        }
+
         if ((target && target.type === 'pad') || (target && target.type === 'via')) {
             Render.setDragState({
                 type: target.type,
@@ -406,18 +410,10 @@ const Interaction = (function() {
 
         if (dragState.type === 'pad') {
             PCBState.movePad(dragState.id, pos);
+        } else if (dragState.type === 'via') {
+            PCBState.moveVia(dragState.id, pos);
         } else if (dragState.type === 'copperPourVertex') {
-            const state = PCBState.getState();
-            const pour = state.copperPours.find(p => p.id === dragState.id);
-            if (pour) {
-                const newPoints = pour.points.map((p, i) => {
-                    if (i === dragState.vertexIndex) {
-                        return { x: pos.x, y: pos.y };
-                    }
-                    return { x: p.x, y: p.y };
-                });
-                PCBState.updateCopperPour(dragState.id, { points: newPoints });
-            }
+            PCBState.setCopperPourVertex(dragState.id, dragState.vertexIndex, pos);
         }
     }
 

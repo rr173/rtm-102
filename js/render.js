@@ -646,29 +646,40 @@ const Render = (function() {
         }
 
         for (const pad of state.pads) {
-            if (pad.net === pour.net) continue;
+            if (pad.net === pour.net) {
+                if (Geometry.isPointInPolygon(pad, pour.points)) {
+                    drawThermalClearance(pad, pad.diameter / 2, clearance);
+                }
+                continue;
+            }
             drawCircleClearance(pad, pad.diameter / 2, clearance);
         }
 
         for (const via of state.vias) {
-            if (via.net === pour.net) continue;
+            if (via.net === pour.net) {
+                if (Geometry.isPointInPolygon(via, pour.points)) {
+                    drawThermalClearance(via, via.diameter / 2, clearance);
+                }
+                continue;
+            }
             drawCircleClearance(via, via.diameter / 2, clearance);
         }
 
         ctx.globalCompositeOperation = 'source-over';
-        ctx.restore();
 
         for (const pad of state.pads) {
             if (pad.net === pour.net && Geometry.isPointInPolygon(pad, pour.points)) {
-                drawThermalRelief(pad, pour);
+                drawThermalSpokes(pad, pour);
             }
         }
 
         for (const via of state.vias) {
             if (via.net === pour.net && Geometry.isPointInPolygon(via, pour.points)) {
-                drawThermalRelief(via, pour);
+                drawThermalSpokes(via, pour);
             }
         }
+
+        ctx.restore();
 
         ctx.save();
         ctx.globalAlpha = opacity;
@@ -705,21 +716,32 @@ const Render = (function() {
         ctx.fill();
     }
 
-    function drawThermalRelief(padOrVia, pour) {
+    function drawThermalClearance(circle, radius, clearance) {
+        const innerR = radius * viewState.scale;
+        const outerR = (radius + clearance) * viewState.scale;
+        const center = worldToScreen(circle);
+        if (outerR <= innerR + 1) return;
+
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, Math.max(0.5, outerR), 0, Math.PI * 2);
+        ctx.arc(center.x, center.y, Math.max(0.5, innerR), 0, Math.PI * 2, true);
+        ctx.fill('evenodd');
+    }
+
+    function drawThermalSpokes(padOrVia, pour) {
         const center = worldToScreen(padOrVia);
         const padRadius = padOrVia.diameter / 2;
         const thermalWidth = 0.25;
-        const gapAngle = Math.PI / 2;
         const spokeAngleStep = Math.PI / 2;
 
         ctx.save();
-        const pourColor = pour.layer === 'front' ? COLORS.front : COLORS.back;
+        const pourColor = pour.layer === 'front' ? COLORS.frontPour : COLORS.backPour;
         ctx.strokeStyle = pourColor;
         ctx.lineWidth = Math.max(1, thermalWidth * viewState.scale);
         ctx.lineCap = 'butt';
 
         const innerR = padRadius * viewState.scale;
-        const outerR = (padRadius + pour.clearance + 0.8) * viewState.scale;
+        const outerR = (padRadius + pour.clearance) * viewState.scale;
 
         for (let i = 0; i < 4; i++) {
             const angle = i * spokeAngleStep;
