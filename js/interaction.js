@@ -706,6 +706,17 @@ const Interaction = (function() {
         Render.render();
         updateDRCDisplay();
         updateZoomDisplay();
+        const panel = document.getElementById('report-panel');
+        if (panel && panel.classList.contains('open')) {
+            renderReportPanel();
+            const connectivity = DRC.getConnectivityReport();
+            if (connectivity && connectivity.length > 0) {
+                Render.setShowRatsnest(true);
+            } else {
+                Render.setShowRatsnest(false);
+            }
+            Render.render();
+        }
     }
 
     function refreshUI() {

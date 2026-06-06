@@ -338,6 +338,7 @@ const DRC = (function() {
         for (const pad of state.pads) allNets.add(pad.net);
         for (const via of state.vias) allNets.add(via.net);
         for (const track of state.tracks) allNets.add(track.net);
+        for (const pour of state.copperPours) allNets.add(pour.net);
 
         const report = [];
 
@@ -345,6 +346,7 @@ const DRC = (function() {
             const pads = state.pads.filter(p => p.net === net);
             const vias = state.vias.filter(v => v.net === net);
             const tracks = state.tracks.filter(t => t.net === net);
+            const pours = state.copperPours.filter(p => p.net === net);
 
             const nodes = [];
             for (const pad of pads) {
@@ -354,7 +356,8 @@ const DRC = (function() {
                     element: pad,
                     x: pad.x,
                     y: pad.y,
-                    radius: pad.diameter / 2
+                    radius: pad.diameter / 2,
+                    layers: pad.layers
                 });
             }
             for (const via of vias) {
@@ -364,131 +367,112 @@ const DRC = (function() {
                     element: via,
                     x: via.x,
                     y: via.y,
-                    radius: via.diameter / 2
+                    radius: via.diameter / 2,
+                    layers: via.layers
                 });
             }
 
             if (nodes.length < 2) continue;
 
-            const adjacency = {};
-            for (const node of nodes) {
-                adjacency[node.id] = [];
-            }
+            const uf = new UnionFind(nodes.map(n => n.id));
 
             for (const track of tracks) {
                 if (track.points.length < 2) continue;
-
-                const endpoints = [
-                    track.points[0],
-                    track.points[track.points.length - 1]
-                ];
-
-                const connectedNodeIds = [];
-                for (const ep of endpoints) {
-                    for (const node of nodes) {
-                        const tol = node.radius + 0.15;
-                        if (Geometry.dist(ep, node) <= tol) {
-                            if (!connectedNodeIds.includes(node.id)) {
-                                connectedNodeIds.push(node.id);
-                            }
-                        }
-                    }
-                }
-
-                const midPoints = [];
-                for (let i = 0; i < track.points.length - 1; i++) {
-                    const segStart = track.points[i];
-                    const segEnd = track.points[i + 1];
-                    for (const node of nodes) {
-                        const d = Geometry.pointToSegmentDistance(node, segStart, segEnd);
-                        const tol = node.radius + track.width / 2 + 0.05;
-                        if (d <= tol) {
-                            if (!connectedNodeIds.includes(node.id)) {
-                                connectedNodeIds.push(node.id);
-                            }
-                        }
-                    }
-                }
-
-                for (let a = 0; a < connectedNodeIds.length; a++) {
-                    for (let b = a + 1; b < connectedNodeIds.length; b++) {
-                        const idA = connectedNodeIds[a];
-                        const idB = connectedNodeIds[b];
-                        if (!adjacency[idA].includes(idB)) {
-                            adjacency[idA].push(idB);
-                        }
-                        if (!adjacency[idB].includes(idA)) {
-                            adjacency[idB].push(idA);
-                        }
-                    }
-                }
-
-                if (tracks.length > 1) {
-                    for (const otherTrack of tracks) {
-                        if (otherTrack.id === track.id) continue;
-                        if (otherTrack.layer !== track.layer) continue;
-                        if (otherTrack.points.length < 2) continue;
-
-                        for (let i = 0; i < track.points.length - 1; i++) {
-                            const s1 = track.points[i];
-                            const e1 = track.points[i + 1];
-                            for (let j = 0; j < otherTrack.points.length - 1; j++) {
-                                const s2 = otherTrack.points[j];
-                                const e2 = otherTrack.points[j + 1];
-                                const d = Geometry.segmentSegmentDistance(s1, e1, s2, e2);
-                                const tol = track.width / 2 + otherTrack.width / 2 + 0.05;
-                                if (d <= tol) {
-                                    const trackConnectedNodes = [];
-                                    const otherConnectedNodes = [];
-                                    for (const node of nodes) {
-                                        const d1 = minDistanceFromNodeToTrack(node, track);
-                                        const tol1 = node.radius + track.width / 2 + 0.1;
-                                        if (d1 <= tol1 && !trackConnectedNodes.includes(node.id)) {
-                                            trackConnectedNodes.push(node.id);
-                                        }
-                                        const d2 = minDistanceFromNodeToTrack(node, otherTrack);
-                                        const tol2 = node.radius + otherTrack.width / 2 + 0.1;
-                                        if (d2 <= tol2 && !otherConnectedNodes.includes(node.id)) {
-                                            otherConnectedNodes.push(node.id);
-                                        }
-                                    }
-                                    for (const idA of trackConnectedNodes) {
-                                        for (const idB of otherConnectedNodes) {
-                                            if (idA !== idB) {
-                                                if (!adjacency[idA].includes(idB)) {
-                                                    adjacency[idA].push(idB);
-                                                }
-                                                if (!adjacency[idB].includes(idA)) {
-                                                    adjacency[idB].push(idA);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            for (const nodeA of nodes) {
-                for (const nodeB of nodes) {
-                    if (nodeA.id >= nodeB.id) continue;
-                    if (nodeA.type === 'via' && nodeB.type === 'via') continue;
-                    const d = Geometry.dist(nodeA, nodeB);
-                    const tol = nodeA.radius + nodeB.radius + 0.05;
+                const connectedToTrack = [];
+                for (const node of nodes) {
+                    if (!node.layers.includes(track.layer)) continue;
+                    const d = minDistanceFromNodeToTrack(node, track);
+                    const tol = node.radius + track.width / 2 + 0.1;
                     if (d <= tol) {
-                        if (!adjacency[nodeA.id].includes(nodeB.id)) {
-                            adjacency[nodeA.id].push(nodeB.id);
-                        }
-                        if (!adjacency[nodeB.id].includes(nodeA.id)) {
-                            adjacency[nodeB.id].push(nodeA.id);
+                        connectedToTrack.push(node.id);
+                    }
+                }
+                for (let a = 0; a < connectedToTrack.length; a++) {
+                    for (let b = a + 1; b < connectedToTrack.length; b++) {
+                        uf.union(connectedToTrack[a], connectedToTrack[b]);
+                    }
+                }
+            }
+
+            for (let ti = 0; ti < tracks.length; ti++) {
+                const t1 = tracks[ti];
+                if (t1.points.length < 2) continue;
+                for (let tj = ti + 1; tj < tracks.length; tj++) {
+                    const t2 = tracks[tj];
+                    if (t2.points.length < 2) continue;
+                    if (t2.layer !== t1.layer) continue;
+                    if (!doTracksIntersect(t1, t2)) continue;
+                    const connectedToEither = new Set();
+                    for (const node of nodes) {
+                        if (!node.layers.includes(t1.layer)) continue;
+                        const d1 = minDistanceFromNodeToTrack(node, t1);
+                        const tol = node.radius + t1.width / 2 + 0.1;
+                        if (d1 <= tol) connectedToEither.add(node.id);
+                        const d2 = minDistanceFromNodeToTrack(node, t2);
+                        const tol2 = node.radius + t2.width / 2 + 0.1;
+                        if (d2 <= tol2) connectedToEither.add(node.id);
+                    }
+                    const ids = Array.from(connectedToEither);
+                    for (let a = 0; a < ids.length; a++) {
+                        for (let b = a + 1; b < ids.length; b++) {
+                            uf.union(ids[a], ids[b]);
                         }
                     }
                 }
             }
 
-            const components = findConnectedComponents(nodes, adjacency);
+            for (const pour of pours) {
+                const connectedToPour = [];
+                for (const node of nodes) {
+                    if (!node.layers.includes(pour.layer)) continue;
+                    const inPour = Geometry.isPointInPolygon(node, pour.points);
+                    const edgeDist = Geometry.pointToPolygonEdgeDistance(node, pour.points);
+                    if (inPour || edgeDist <= node.radius) {
+                        connectedToPour.push(node.id);
+                    }
+                }
+                for (const track of tracks) {
+                    if (track.layer !== pour.layer) continue;
+                    if (track.points.length < 2) continue;
+                    if (doesTrackConnectToPour(track, pour)) {
+                        for (const node of nodes) {
+                            if (!node.layers.includes(track.layer)) continue;
+                            const d = minDistanceFromNodeToTrack(node, track);
+                            const tol = node.radius + track.width / 2 + 0.1;
+                            if (d <= tol && !connectedToPour.includes(node.id)) {
+                                connectedToPour.push(node.id);
+                            }
+                        }
+                    }
+                }
+                for (let a = 0; a < connectedToPour.length; a++) {
+                    for (let b = a + 1; b < connectedToPour.length; b++) {
+                        uf.union(connectedToPour[a], connectedToPour[b]);
+                    }
+                }
+            }
+
+            for (let ai = 0; ai < nodes.length; ai++) {
+                for (let bi = ai + 1; bi < nodes.length; bi++) {
+                    const na = nodes[ai];
+                    const nb = nodes[bi];
+                    const hasCommonLayer = na.layers.some(l => nb.layers.includes(l));
+                    if (!hasCommonLayer) continue;
+                    const d = Geometry.dist(na, nb);
+                    const tol = na.radius + nb.radius + 0.05;
+                    if (d <= tol) {
+                        uf.union(na.id, nb.id);
+                    }
+                }
+            }
+
+            const componentMap = {};
+            for (const node of nodes) {
+                const root = uf.find(node.id);
+                if (!componentMap[root]) componentMap[root] = [];
+                componentMap[root].push(node);
+            }
+            const components = Object.values(componentMap);
 
             if (components.length > 1) {
                 const missing = findMissingConnections(components);
@@ -502,6 +486,80 @@ const DRC = (function() {
         }
 
         return report;
+    }
+
+    function doTracksIntersect(t1, t2) {
+        for (let i = 0; i < t1.points.length - 1; i++) {
+            for (let j = 0; j < t2.points.length - 1; j++) {
+                const d = Geometry.segmentSegmentDistance(
+                    t1.points[i], t1.points[i + 1],
+                    t2.points[j], t2.points[j + 1]
+                );
+                const tol = t1.width / 2 + t2.width / 2 + 0.05;
+                if (d <= tol) return true;
+            }
+        }
+        return false;
+    }
+
+    class UnionFind {
+        constructor(elements) {
+            this.parent = {};
+            this.rank = {};
+            for (const el of elements) {
+                this.parent[el] = el;
+                this.rank[el] = 0;
+            }
+        }
+        find(x) {
+            if (this.parent[x] !== x) {
+                this.parent[x] = this.find(this.parent[x]);
+            }
+            return this.parent[x];
+        }
+        union(x, y) {
+            const rx = this.find(x);
+            const ry = this.find(y);
+            if (rx === ry) return;
+            if (this.rank[rx] < this.rank[ry]) {
+                this.parent[rx] = ry;
+            } else if (this.rank[rx] > this.rank[ry]) {
+                this.parent[ry] = rx;
+            } else {
+                this.parent[ry] = rx;
+                this.rank[rx]++;
+            }
+        }
+    }
+
+    function doesTrackConnectToPour(track, pour) {
+        for (let i = 0; i < track.points.length - 1; i++) {
+            const segStart = track.points[i];
+            const segEnd = track.points[i + 1];
+            if (Geometry.isPointInPolygon(segStart, pour.points) ||
+                Geometry.isPointInPolygon(segEnd, pour.points)) {
+                return true;
+            }
+            const mid = {
+                x: (segStart.x + segEnd.x) / 2,
+                y: (segStart.y + segEnd.y) / 2
+            };
+            if (Geometry.isPointInPolygon(mid, pour.points)) {
+                return true;
+            }
+            for (let j = 0; j < pour.points.length; j++) {
+                const k = (j + 1) % pour.points.length;
+                const d = Geometry.segmentSegmentDistance(
+                    segStart, segEnd,
+                    pour.points[j], pour.points[k]
+                );
+                const tol = track.width / 2 + 0.05;
+                if (d <= tol) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     function minDistanceFromNodeToTrack(node, track) {
