@@ -6,6 +6,7 @@ const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
+const { mountBomRoutes } = require('./bom');
 
 const app = express();
 const server = http.createServer(app);
@@ -102,6 +103,7 @@ function dbAll(sql, params = []) {
   await initDemoRules();
   await recoverImportTasks();
   startImportQueue();
+  mountBomRoutes(app, { getLatestVersion });
   server.listen(PORT, () => {
     console.log(`PCB Editor server listening on port ${PORT}`);
   });
