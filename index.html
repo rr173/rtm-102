@@ -112,6 +112,10 @@
                     <span class="icon">📋</span>
                     <span class="label">报告</span>
                 </button>
+                <button class="tool-btn" id="btn-export-gerber" title="导出Gerber文件">
+                    <span class="icon">📤</span>
+                    <span class="label">导出Gerber</span>
+                </button>
             </div>
 
             <div class="toolbar-separator"></div>
@@ -239,11 +243,13 @@
         </div>
     </div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="js/geometry.js"></script>
     <script src="js/state.js"></script>
     <script src="js/drc.js"></script>
     <script src="js/render.js"></script>
     <script src="js/interaction.js"></script>
+    <script src="js/gerber.js"></script>
     <script src="js/main.js"></script>
 </body>
 </html>

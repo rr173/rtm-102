@@ -800,6 +800,10 @@ const Interaction = (function() {
             btn.classList.toggle('active', panel.classList.contains('open'));
         });
 
+        document.getElementById('btn-export-gerber').addEventListener('click', () => {
+            GerberExport.exportGerber();
+        });
+
         document.getElementById('report-close').addEventListener('click', () => {
             closeReportPanel();
             document.getElementById('btn-report').classList.remove('active');
