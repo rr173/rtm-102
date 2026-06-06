@@ -78,8 +78,30 @@ function dbAll(sql, params = []) {
       created_at INTEGER NOT NULL
     )
   `);
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS import_batches (
+      batch_id TEXT PRIMARY KEY,
+      created_at INTEGER NOT NULL
+    )
+  `);
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS import_tasks (
+      task_id TEXT PRIMARY KEY,
+      batch_id TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      status TEXT NOT NULL,
+      content TEXT,
+      error TEXT,
+      board_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (batch_id) REFERENCES import_batches(batch_id) ON DELETE CASCADE
+    )
+  `);
   await initDemoBoard();
   await initDemoRules();
+  await recoverImportTasks();
+  startImportQueue();
   server.listen(PORT, () => {
     console.log(`PCB Editor server listening on port ${PORT}`);
   });
@@ -1093,6 +1115,422 @@ app.post('/api/boards/:boardId/compare', async (req, res) => {
     }
 
     res.json({ results, diff });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+const MAX_FILES_PER_BATCH = 10;
+const MAX_FILE_SIZE_BYTES = 500 * 1024;
+const PROCESS_INTERVAL_MS = 500;
+
+const importQueue = [];
+let isProcessing = false;
+let queueTimer = null;
+
+function parseSExpression(text) {
+  let pos = 0;
+  const len = text.length;
+
+  function skipWhitespace() {
+    while (pos < len && /\s/.test(text[pos])) pos++;
+  }
+
+  function parseAtom() {
+    const start = pos;
+    while (pos < len && !/\s|\(|\)/.test(text[pos])) pos++;
+    if (pos === start) throw new Error('Expected atom');
+    const raw = text.substring(start, pos);
+    if (raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2) {
+      return raw.substring(1, raw.length - 1);
+    }
+    const num = Number(raw);
+    if (!isNaN(num) && raw.trim() !== '') return num;
+    return raw;
+  }
+
+  function parseList() {
+    if (text[pos] !== '(') throw new Error('Expected (');
+    pos++;
+    const items = [];
+    while (true) {
+      skipWhitespace();
+      if (pos >= len) throw new Error('Unclosed parenthesis');
+      if (text[pos] === ')') {
+        pos++;
+        return items;
+      }
+      if (text[pos] === '(') {
+        items.push(parseList());
+      } else {
+        items.push(parseAtom());
+      }
+    }
+  }
+
+  skipWhitespace();
+  if (pos >= len) throw new Error('Empty input');
+  if (text[pos] !== '(') throw new Error('Expected top-level (');
+  const result = parseList();
+  skipWhitespace();
+  if (pos < len) throw new Error('Unexpected trailing content');
+  return result;
+}
+
+function findAll(expr, tagName) {
+  const results = [];
+  if (!Array.isArray(expr)) return results;
+  for (const item of expr) {
+    if (Array.isArray(item) && item.length > 0 && item[0] === tagName) {
+      results.push(item);
+    }
+    if (Array.isArray(item)) {
+      results.push(...findAll(item, tagName));
+    }
+  }
+  return results;
+}
+
+function findInList(list, tagName) {
+  if (!Array.isArray(list)) return null;
+  for (const item of list) {
+    if (Array.isArray(item) && item.length > 0 && item[0] === tagName) {
+      return item;
+    }
+  }
+  return null;
+}
+
+function getAtCoord(expr) {
+  const at = findInList(expr, 'at');
+  if (!at || at.length < 3) throw new Error('Missing (at x y)');
+  return { x: Number(at[1]), y: Number(at[2]) };
+}
+
+function getSize(expr) {
+  const sz = findInList(expr, 'size');
+  if (!sz || sz.length < 3) throw new Error('Missing (size w h)');
+  return { w: Number(sz[1]), h: Number(sz[2]) };
+}
+
+function getNetNumber(expr) {
+  const net = findInList(expr, 'net');
+  if (!net || net.length < 2) return null;
+  return Number(net[1]);
+}
+
+function getDrill(expr) {
+  const drill = findInList(expr, 'drill');
+  if (!drill || drill.length < 2) return null;
+  return Number(drill[1]);
+}
+
+function getLayer(expr) {
+  const layerEntry = findInList(expr, 'layer');
+  if (layerEntry && layerEntry.length >= 2) {
+    const layerName = layerEntry[1];
+    if (layerName === 'F.Cu') return 'front';
+    if (layerName === 'B.Cu') return 'back';
+    return layerName;
+  }
+  for (const item of expr) {
+    if (typeof item === 'string' && (item === 'F.Cu' || item === 'B.Cu')) {
+      return item === 'F.Cu' ? 'front' : 'back';
+    }
+  }
+  return null;
+}
+
+function convertKiCadToInternal(content) {
+  const parsed = parseSExpression(content);
+  if (!Array.isArray(parsed) || parsed.length === 0 || parsed[0] !== 'pcb') {
+    throw new Error('Top-level must be (pcb ...)');
+  }
+
+  const netMap = {};
+  const netEntries = findAll(parsed, 'net');
+  for (const net of netEntries) {
+    if (net.length >= 3) {
+      const num = Number(net[1]);
+      const name = typeof net[2] === 'string' ? net[2] : String(net[1]);
+      netMap[num] = name;
+    }
+  }
+
+  const pads = [];
+  const tracks = [];
+  let nextId = 1;
+  const genId = () => nextId++;
+
+  const modules = findAll(parsed, 'module');
+  for (const mod of modules) {
+    const padEntries = findAll(mod, 'pad');
+    for (const pad of padEntries) {
+      if (pad.length < 4) throw new Error('Invalid pad entry');
+      const coord = getAtCoord(pad);
+      const size = getSize(pad);
+      const netNum = getNetNumber(pad);
+      const drill = getDrill(pad);
+      const padShape = pad[3];
+      let diameter = Math.max(size.w, size.h);
+      if (padShape === 'circle') {
+        diameter = size.w;
+      }
+      const layers = pad.includes('thru_hole') ? ['front', 'back'] : [getLayer(pad) || 'front'];
+      pads.push({
+        id: genId(),
+        type: 'pad',
+        net: netNum !== null && netMap[netNum] ? netMap[netNum] : '',
+        x: coord.x,
+        y: coord.y,
+        diameter: diameter,
+        hole: drill || 0,
+        layers: layers
+      });
+    }
+  }
+
+  const segments = findAll(parsed, 'segment');
+  for (const seg of segments) {
+    const startEntry = findInList(seg, 'start');
+    const endEntry = findInList(seg, 'end');
+    if (!startEntry || startEntry.length < 3) throw new Error('Missing (start x y) in segment');
+    if (!endEntry || endEntry.length < 3) throw new Error('Missing (end x y) in segment');
+    const widthEntry = findInList(seg, 'width');
+    if (!widthEntry || widthEntry.length < 2) throw new Error('Missing (width w) in segment');
+    const layer = getLayer(seg);
+    if (!layer) throw new Error('Missing layer (F.Cu/B.Cu) in segment');
+    const netNum = getNetNumber(seg);
+    tracks.push({
+      id: genId(),
+      type: 'track',
+      net: netNum !== null && netMap[netNum] ? netMap[netNum] : '',
+      layer: layer,
+      width: Number(widthEntry[1]),
+      points: [
+        { x: Number(startEntry[1]), y: Number(startEntry[2]) },
+        { x: Number(endEntry[1]), y: Number(endEntry[2]) }
+      ]
+    });
+  }
+
+  return {
+    pads,
+    tracks,
+    vias: [],
+    copperPours: [],
+    nextId
+  };
+}
+
+async function updateTaskStatus(taskId, status, updates = {}) {
+  const now = Date.now();
+  const fields = ['status = ?', 'updated_at = ?'];
+  const params = [status, now];
+  if (updates.error !== undefined) {
+    fields.push('error = ?');
+    params.push(updates.error);
+  }
+  if (updates.board_id !== undefined) {
+    fields.push('board_id = ?');
+    params.push(updates.board_id);
+  }
+  params.push(taskId);
+  await dbRun(`UPDATE import_tasks SET ${fields.join(', ')} WHERE task_id = ?`, params);
+}
+
+async function processTask(task) {
+  try {
+    await updateTaskStatus(task.task_id, 'processing');
+    const state = convertKiCadToInternal(task.content);
+    const boardId = uuidv4().replace(/-/g, '').substring(0, 12);
+    const now = Date.now();
+    await dbRun(
+      'INSERT INTO boards (id, name, created_at) VALUES (?, ?, ?)',
+      [boardId, task.filename.replace(/\.[^.]+$/, ''), now]
+    );
+    await dbRun(
+      'INSERT INTO board_versions (board_id, version, state_json, summary, created_at) VALUES (?, ?, ?, ?, ?)',
+      [boardId, 1, JSON.stringify(state), 'Imported from KiCad', now]
+    );
+    boardLatestState[boardId] = { version: 1, state };
+    await updateTaskStatus(task.task_id, 'completed', { board_id: boardId });
+  } catch (e) {
+    console.error(`Task ${task.task_id} failed:`, e.message);
+    await updateTaskStatus(task.task_id, 'failed', { error: e.message });
+  }
+}
+
+async function processQueueStep() {
+  if (isProcessing) return;
+  if (importQueue.length === 0) return;
+
+  isProcessing = true;
+  const taskId = importQueue.shift();
+  try {
+    const task = await dbGet('SELECT * FROM import_tasks WHERE task_id = ?', [taskId]);
+    if (task && task.status === 'queued') {
+      await processTask(task);
+    }
+  } catch (e) {
+    console.error('Queue processing error:', e);
+  } finally {
+    isProcessing = false;
+  }
+}
+
+function startImportQueue() {
+  if (queueTimer) return;
+  queueTimer = setInterval(processQueueStep, PROCESS_INTERVAL_MS);
+  console.log('Import queue started');
+}
+
+async function recoverImportTasks() {
+  try {
+    const rows = await dbAll(
+      "SELECT task_id FROM import_tasks WHERE status IN ('queued', 'processing') ORDER BY created_at ASC"
+    );
+    for (const row of rows) {
+      await updateTaskStatus(row.task_id, 'queued', { error: null });
+      importQueue.push(row.task_id);
+    }
+    if (rows.length > 0) {
+      console.log(`Recovered ${rows.length} import tasks from database`);
+    }
+  } catch (e) {
+    console.error('Failed to recover import tasks:', e);
+  }
+}
+
+function enqueueTask(taskId) {
+  importQueue.push(taskId);
+}
+
+app.post('/api/import/batch', async (req, res) => {
+  try {
+    const { files } = req.body || {};
+    if (!Array.isArray(files)) {
+      return res.status(400).json({ error: 'files must be an array' });
+    }
+    if (files.length > MAX_FILES_PER_BATCH) {
+      return res.status(400).json({ error: `Maximum ${MAX_FILES_PER_BATCH} files per batch` });
+    }
+
+    const batchId = uuidv4().replace(/-/g, '').substring(0, 12);
+    const now = Date.now();
+    await dbRun('INSERT INTO import_batches (batch_id, created_at) VALUES (?, ?)', [batchId, now]);
+
+    const tasks = [];
+    for (const file of files) {
+      const taskId = uuidv4().replace(/-/g, '').substring(0, 12);
+      const filename = file?.filename || 'unknown.kicad_pcb';
+      const content = file?.content || '';
+      const contentSize = Buffer.byteLength(content, 'utf8');
+
+      let status = 'queued';
+      let error = null;
+      let storedContent = content;
+
+      if (contentSize > MAX_FILE_SIZE_BYTES) {
+        status = 'failed';
+        error = `File too large: ${contentSize} bytes (max ${MAX_FILE_SIZE_BYTES})`;
+        storedContent = '';
+      }
+
+      await dbRun(
+        `INSERT INTO import_tasks (task_id, batch_id, filename, status, content, error, board_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [taskId, batchId, filename, status, storedContent, error, null, now, now]
+      );
+
+      if (status === 'queued') {
+        enqueueTask(taskId);
+      }
+
+      tasks.push({ task_id: taskId, filename, status });
+    }
+
+    res.status(201).json({ batch_id: batchId, tasks });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/import/batches', async (req, res) => {
+  try {
+    const batches = await dbAll('SELECT * FROM import_batches ORDER BY created_at DESC');
+    const result = [];
+    for (const batch of batches) {
+      const tasks = await dbAll(
+        'SELECT status FROM import_tasks WHERE batch_id = ?',
+        [batch.batch_id]
+      );
+      const total = tasks.length;
+      const completed = tasks.filter(t => t.status === 'completed').length;
+      const failed = tasks.filter(t => t.status === 'failed').length;
+      result.push({
+        batch_id: batch.batch_id,
+        created_at: batch.created_at,
+        total_tasks: total,
+        completed,
+        failed
+      });
+    }
+    res.json(result);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/import/batches/:batchId', async (req, res) => {
+  try {
+    const batch = await dbGet('SELECT * FROM import_batches WHERE batch_id = ?', [req.params.batchId]);
+    if (!batch) return res.status(404).json({ error: 'Batch not found' });
+    const tasks = await dbAll(
+      'SELECT task_id, filename, status, error, board_id, created_at, updated_at FROM import_tasks WHERE batch_id = ? ORDER BY created_at ASC',
+      [req.params.batchId]
+    );
+    res.json({
+      batch_id: batch.batch_id,
+      created_at: batch.created_at,
+      tasks
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/import/tasks/:taskId/cancel', async (req, res) => {
+  try {
+    const task = await dbGet('SELECT * FROM import_tasks WHERE task_id = ?', [req.params.taskId]);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    if (task.status !== 'queued') {
+      return res.status(409).json({ error: `Cannot cancel task with status: ${task.status}` });
+    }
+    const idx = importQueue.indexOf(task.task_id);
+    if (idx >= 0) importQueue.splice(idx, 1);
+    await updateTaskStatus(task.task_id, 'cancelled');
+    res.json({ ok: true, task_id: task.task_id, status: 'cancelled' });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/import/tasks/:taskId/retry', async (req, res) => {
+  try {
+    const task = await dbGet('SELECT * FROM import_tasks WHERE task_id = ?', [req.params.taskId]);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    if (task.status !== 'failed') {
+      return res.status(409).json({ error: `Cannot retry task with status: ${task.status}` });
+    }
+    await updateTaskStatus(task.task_id, 'queued', { error: null, board_id: null });
+    enqueueTask(task.task_id);
+    res.json({ ok: true, task_id: task.task_id, status: 'queued' });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
