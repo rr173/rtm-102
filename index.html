@@ -108,6 +108,41 @@
             <div class="toolbar-spacer"></div>
 
             <div class="toolbar-group">
+                <label class="toolbar-label">版本:</label>
+                <div class="version-dropdown">
+                    <button class="tool-btn" id="btn-versions" title="历史版本">
+                        <span class="icon">🕘</span>
+                        <span class="label" id="version-label">v1</span>
+                    </button>
+                    <div class="version-menu" id="version-menu">
+                        <div class="version-header">
+                            <span>历史版本</span>
+                            <button class="version-close" id="version-close">×</button>
+                        </div>
+                        <div class="version-list" id="version-list">
+                            <div class="empty-message">加载中...</div>
+                        </div>
+                        <div class="version-actions" id="version-preview-actions" style="display:none;">
+                            <span class="preview-indicator">预览模式 (只读)</span>
+                            <button class="version-btn" id="btn-exit-preview">退出预览</button>
+                            <button class="version-btn primary" id="btn-revert-confirm">回退到此版本</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="toolbar-separator"></div>
+
+            <div class="toolbar-group">
+                <button class="tool-btn" id="btn-save" title="手动保存版本">
+                    <span class="icon">💾</span>
+                    <span class="label">保存</span>
+                </button>
+            </div>
+
+            <div class="toolbar-separator"></div>
+
+            <div class="toolbar-group">
                 <button class="tool-btn" id="btn-report" title="生成DRC报告">
                     <span class="icon">📋</span>
                     <span class="label">报告</span>
@@ -190,6 +225,22 @@
 
         <div class="status-bar">
             <div class="status-item">
+                <span class="status-label">Board:</span>
+                <span id="board-id" class="status-value highlight">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">在线:</span>
+                <span id="online-count" class="status-value ok">1</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">连接:</span>
+                <span id="conn-status" class="status-value warning">未连接</span>
+            </div>
+            <div class="status-item" id="preview-status" style="display:none;">
+                <span class="status-value highlight">🔍 预览模式 (只读)</span>
+            </div>
+            <div class="toolbar-spacer"></div>
+            <div class="status-item">
                 <span class="status-label">DRC违规:</span>
                 <span id="drc-count" class="status-value ok">0</span>
             </div>
@@ -246,6 +297,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="js/geometry.js"></script>
     <script src="js/state.js"></script>
+    <script src="js/collaboration.js"></script>
     <script src="js/drc.js"></script>
     <script src="js/render.js"></script>
     <script src="js/interaction.js"></script>

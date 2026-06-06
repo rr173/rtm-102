@@ -10,8 +10,30 @@ const PCBState = (function() {
     const MAX_HISTORY = 30;
     let undoStack = [];
     let redoStack = [];
+    let operationListeners = [];
+    let replayMode = false;
+
+    function onOperation(listener) {
+        operationListeners.push(listener);
+        return () => {
+            const i = operationListeners.indexOf(listener);
+            if (i >= 0) operationListeners.splice(i, 1);
+        };
+    }
+
+    function emitOperation(type, payload) {
+        if (replayMode) return;
+        for (const l of operationListeners) {
+            try { l({ type, payload }); } catch (e) { console.error(e); }
+        }
+    }
+
+    function setReplayMode(mode) {
+        replayMode = mode;
+    }
 
     function saveSnapshot() {
+        if (replayMode) return;
         const snapshot = JSON.parse(JSON.stringify(state));
         undoStack.push(snapshot);
         if (undoStack.length > MAX_HISTORY) {
@@ -46,9 +68,12 @@ const PCBState = (function() {
         return state;
     }
 
-    function setState(newState) {
-        saveSnapshot();
+    function setState(newState, opts = {}) {
+        if (!opts.silent) saveSnapshot();
         state = JSON.parse(JSON.stringify(newState));
+        if (!opts.silent && !opts.noEmit) {
+            emitOperation('setState', { state: JSON.parse(JSON.stringify(newState)) });
+        }
     }
 
     function clearAll() {
@@ -57,6 +82,11 @@ const PCBState = (function() {
         state.tracks = [];
         state.vias = [];
         state.copperPours = [];
+        emitOperation('clearAll', {});
+    }
+
+    function genId() {
+        return state.nextId++;
     }
 
     function addCopperPour(pour) {
@@ -70,6 +100,7 @@ const PCBState = (function() {
             clearance: pour.clearance !== undefined ? pour.clearance : 0.3
         };
         state.copperPours.push(newPour);
+        emitOperation('addCopperPour', { pour: JSON.parse(JSON.stringify(newPour)) });
         return newPour;
     }
 
@@ -82,6 +113,7 @@ const PCBState = (function() {
                 pour.points = updates.points.map(p => ({ x: p.x, y: p.y }));
             }
         }
+        emitOperation('updateCopperPour', { id, updates: JSON.parse(JSON.stringify(updates)) });
         return pour;
     }
 
@@ -89,6 +121,7 @@ const PCBState = (function() {
         const pour = state.copperPours.find(p => p.id === id);
         if (pour && vertexIndex >= 0 && vertexIndex < pour.points.length) {
             pour.points[vertexIndex] = { x: newPosition.x, y: newPosition.y };
+            emitOperation('setCopperPourVertex', { id, vertexIndex, newPosition: { x: newPosition.x, y: newPosition.y } });
         }
     }
 
@@ -98,6 +131,7 @@ const PCBState = (function() {
         if (idx >= 0) {
             state.copperPours.splice(idx, 1);
         }
+        emitOperation('removeCopperPour', { id });
     }
 
     function findCopperPourAt(point, layer = null, tolerance = 0.5) {
@@ -125,10 +159,6 @@ const PCBState = (function() {
         return null;
     }
 
-    function genId() {
-        return state.nextId++;
-    }
-
     function addPad(pad) {
         saveSnapshot();
         const newPad = {
@@ -142,6 +172,7 @@ const PCBState = (function() {
             layers: ['front', 'back']
         };
         state.pads.push(newPad);
+        emitOperation('addPad', { pad: JSON.parse(JSON.stringify(newPad)) });
         return newPad;
     }
 
@@ -154,6 +185,7 @@ const PCBState = (function() {
                 pad.hole = pad.diameter * 0.5;
             }
         }
+        emitOperation('updatePad', { id, updates: JSON.parse(JSON.stringify(updates)) });
         return pad;
     }
 
@@ -164,6 +196,7 @@ const PCBState = (function() {
             state.pads.splice(idx, 1);
         }
         state.tracks = state.tracks.filter(t => !isTrackConnectedToPad(t, id));
+        emitOperation('removePad', { id });
     }
 
     function isTrackConnectedToPad(track, padId) {
@@ -189,6 +222,7 @@ const PCBState = (function() {
             points: track.points.map(p => ({ x: p.x, y: p.y }))
         };
         state.tracks.push(newTrack);
+        emitOperation('addTrack', { track: JSON.parse(JSON.stringify(newTrack)) });
         return newTrack;
     }
 
@@ -201,6 +235,7 @@ const PCBState = (function() {
                 track.points = updates.points.map(p => ({ x: p.x, y: p.y }));
             }
         }
+        emitOperation('updateTrack', { id, updates: JSON.parse(JSON.stringify(updates)) });
         return track;
     }
 
@@ -210,6 +245,7 @@ const PCBState = (function() {
         if (idx >= 0) {
             state.tracks.splice(idx, 1);
         }
+        emitOperation('removeTrack', { id });
     }
 
     function addVia(via) {
@@ -225,6 +261,7 @@ const PCBState = (function() {
             layers: ['front', 'back']
         };
         state.vias.push(newVia);
+        emitOperation('addVia', { via: JSON.parse(JSON.stringify(newVia)) });
         return newVia;
     }
 
@@ -234,6 +271,7 @@ const PCBState = (function() {
         if (via) {
             Object.assign(via, updates);
         }
+        emitOperation('updateVia', { id, updates: JSON.parse(JSON.stringify(updates)) });
         return via;
     }
 
@@ -243,6 +281,7 @@ const PCBState = (function() {
         if (idx >= 0) {
             state.vias.splice(idx, 1);
         }
+        emitOperation('removeVia', { id });
     }
 
     function findPadAt(point, tolerance = 0.5) {
@@ -334,6 +373,7 @@ const PCBState = (function() {
                 end.y = pad.y;
             }
         }
+        emitOperation('movePad', { id: padId, newPosition: { x: newPosition.x, y: newPosition.y } });
     }
 
     function moveVia(viaId, newPosition) {
@@ -358,6 +398,7 @@ const PCBState = (function() {
                 end.y = via.y;
             }
         }
+        emitOperation('moveVia', { id: viaId, newPosition: { x: newPosition.x, y: newPosition.y } });
     }
 
     function getPadsByNet(net) {
@@ -470,6 +511,154 @@ const PCBState = (function() {
         ];
     }
 
+    function applyOperation(op) {
+        if (!op || !op.type) return;
+        setReplayMode(true);
+        try {
+            switch (op.type) {
+                case 'setState':
+                    setState(op.payload.state, { noEmit: true });
+                    break;
+                case 'clearAll':
+                    state.pads = [];
+                    state.tracks = [];
+                    state.vias = [];
+                    state.copperPours = [];
+                    break;
+                case 'addPad':
+                    if (op.payload.pad) state.pads.push(JSON.parse(JSON.stringify(op.payload.pad)));
+                    break;
+                case 'updatePad': {
+                    const pad = state.pads.find(p => p.id === op.payload.id);
+                    if (pad) Object.assign(pad, op.payload.updates);
+                    break;
+                }
+                case 'removePad': {
+                    const idx = state.pads.findIndex(p => p.id === op.payload.id);
+                    if (idx >= 0) state.pads.splice(idx, 1);
+                    state.tracks = state.tracks.filter(t => !isTrackConnectedToPadLocal(t, op.payload.id));
+                    break;
+                }
+                case 'movePad': {
+                    const pad = state.pads.find(p => p.id === op.payload.id);
+                    if (pad) {
+                        const dx = op.payload.newPosition.x - pad.x;
+                        const dy = op.payload.newPosition.y - pad.y;
+                        pad.x = op.payload.newPosition.x;
+                        pad.y = op.payload.newPosition.y;
+                        for (const track of state.tracks) {
+                            if (track.points.length < 1) continue;
+                            const start = track.points[0];
+                            const end = track.points[track.points.length - 1];
+                            const tol = pad.diameter / 2 + 0.1;
+                            if (Geometry.dist(start, { x: pad.x - dx, y: pad.y - dy }) <= tol) {
+                                start.x = pad.x;
+                                start.y = pad.y;
+                            }
+                            if (Geometry.dist(end, { x: pad.x - dx, y: pad.y - dy }) <= tol) {
+                                end.x = pad.x;
+                                end.y = pad.y;
+                            }
+                        }
+                    }
+                    break;
+                }
+                case 'addTrack':
+                    if (op.payload.track) state.tracks.push(JSON.parse(JSON.stringify(op.payload.track)));
+                    break;
+                case 'updateTrack': {
+                    const track = state.tracks.find(t => t.id === op.payload.id);
+                    if (track) {
+                        Object.assign(track, op.payload.updates);
+                        if (op.payload.updates.points) {
+                            track.points = op.payload.updates.points.map(p => ({ x: p.x, y: p.y }));
+                        }
+                    }
+                    break;
+                }
+                case 'removeTrack': {
+                    const idx = state.tracks.findIndex(t => t.id === op.payload.id);
+                    if (idx >= 0) state.tracks.splice(idx, 1);
+                    break;
+                }
+                case 'addVia':
+                    if (op.payload.via) state.vias.push(JSON.parse(JSON.stringify(op.payload.via)));
+                    break;
+                case 'updateVia': {
+                    const via = state.vias.find(v => v.id === op.payload.id);
+                    if (via) Object.assign(via, op.payload.updates);
+                    break;
+                }
+                case 'removeVia': {
+                    const idx = state.vias.findIndex(v => v.id === op.payload.id);
+                    if (idx >= 0) state.vias.splice(idx, 1);
+                    break;
+                }
+                case 'moveVia': {
+                    const via = state.vias.find(v => v.id === op.payload.id);
+                    if (via) {
+                        const dx = op.payload.newPosition.x - via.x;
+                        const dy = op.payload.newPosition.y - via.y;
+                        via.x = op.payload.newPosition.x;
+                        via.y = op.payload.newPosition.y;
+                        for (const track of state.tracks) {
+                            if (track.points.length < 1) continue;
+                            const start = track.points[0];
+                            const end = track.points[track.points.length - 1];
+                            const tol = via.diameter / 2 + 0.1;
+                            if (Geometry.dist(start, { x: via.x - dx, y: via.y - dy }) <= tol) {
+                                start.x = via.x;
+                                start.y = via.y;
+                            }
+                            if (Geometry.dist(end, { x: via.x - dx, y: via.y - dy }) <= tol) {
+                                end.x = via.x;
+                                end.y = via.y;
+                            }
+                        }
+                    }
+                    break;
+                }
+                case 'addCopperPour':
+                    if (op.payload.pour) state.copperPours.push(JSON.parse(JSON.stringify(op.payload.pour)));
+                    break;
+                case 'updateCopperPour': {
+                    const pour = state.copperPours.find(p => p.id === op.payload.id);
+                    if (pour) {
+                        Object.assign(pour, op.payload.updates);
+                        if (op.payload.updates.points) {
+                            pour.points = op.payload.updates.points.map(p => ({ x: p.x, y: p.y }));
+                        }
+                    }
+                    break;
+                }
+                case 'removeCopperPour': {
+                    const idx = state.copperPours.findIndex(p => p.id === op.payload.id);
+                    if (idx >= 0) state.copperPours.splice(idx, 1);
+                    break;
+                }
+                case 'setCopperPourVertex': {
+                    const pour = state.copperPours.find(p => p.id === op.payload.id);
+                    if (pour && op.payload.vertexIndex >= 0 && op.payload.vertexIndex < pour.points.length) {
+                        pour.points[op.payload.vertexIndex] = { x: op.payload.newPosition.x, y: op.payload.newPosition.y };
+                    }
+                    break;
+                }
+            }
+        } finally {
+            setReplayMode(false);
+        }
+    }
+
+    function isTrackConnectedToPadLocal(track, padId) {
+        const pad = state.pads.find(p => p.id === padId);
+        if (!pad) return false;
+        if (track.points.length < 2) return false;
+        const start = track.points[0];
+        const end = track.points[track.points.length - 1];
+        const tol = pad.diameter / 2 + 0.1;
+        return Geometry.dist(start, pad) <= tol || Geometry.dist(end, pad) <= tol;
+    }
+
     return {
         getState,
         setState,
@@ -504,6 +693,8 @@ const PCBState = (function() {
         canUndo,
         canRedo,
         saveSnapshot,
-        loadDemoData
+        loadDemoData,
+        onOperation,
+        applyOperation
     };
 })();
