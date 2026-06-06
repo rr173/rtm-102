@@ -84,6 +84,21 @@ const DRC = (function() {
             }
         }
 
+        for (const pour of state.copperPours) {
+            if (pour.layer !== layer) continue;
+            elements.push({
+                type: 'copperPour',
+                element: pour,
+                net: pour.net,
+                layer: layer,
+                shape: {
+                    type: 'polygon',
+                    points: pour.points,
+                    clearance: pour.clearance
+                }
+            });
+        }
+
         return elements;
     }
 
@@ -102,7 +117,8 @@ const DRC = (function() {
                 }
 
                 const result = computeClearance(e1.shape, e2.shape);
-                if (result.clearance < minClearance - 1e-6) {
+                const requiredClearance = computeRequiredClearance(e1, e2);
+                if (result.clearance < requiredClearance - 1e-6) {
                     violations.push({
                         layer: layer,
                         position: result.position,
@@ -115,6 +131,17 @@ const DRC = (function() {
         }
     }
 
+    function computeRequiredClearance(e1, e2) {
+        let clearance = minClearance;
+        if (e1.type === 'copperPour') {
+            clearance = Math.max(clearance, e1.shape.clearance);
+        }
+        if (e2.type === 'copperPour') {
+            clearance = Math.max(clearance, e2.shape.clearance);
+        }
+        return clearance;
+    }
+
     function computeClearance(shape1, shape2) {
         if (shape1.type === 'circle' && shape2.type === 'circle') {
             return circleCircleClearance(shape1, shape2);
@@ -124,8 +151,85 @@ const DRC = (function() {
             return circleSegmentClearance(shape2, shape1);
         } else if (shape1.type === 'segment' && shape2.type === 'segment') {
             return segmentSegmentClearance(shape1, shape2);
+        } else if (shape1.type === 'polygon' && shape2.type === 'circle') {
+            return polygonCircleClearance(shape1, shape2);
+        } else if (shape1.type === 'circle' && shape2.type === 'polygon') {
+            return polygonCircleClearance(shape2, shape1);
+        } else if (shape1.type === 'polygon' && shape2.type === 'segment') {
+            return polygonSegmentClearance(shape1, shape2);
+        } else if (shape1.type === 'segment' && shape2.type === 'polygon') {
+            return polygonSegmentClearance(shape2, shape1);
+        } else if (shape1.type === 'polygon' && shape2.type === 'polygon') {
+            return polygonPolygonClearance(shape1, shape2);
         }
         return { clearance: Infinity, position: null };
+    }
+
+    function polygonCircleClearance(polygon, circle) {
+        if (Geometry.isPointInPolygon(circle.center, polygon.points)) {
+            return { clearance: Infinity, position: null };
+        }
+        const dist = Geometry.circleToPolygonDistance(circle.center, circle.radius, polygon.points);
+        let midPoint = null;
+        const nearest = Geometry.findNearestPointOnPolyline(circle.center, polygon.points);
+        if (nearest.point) {
+            midPoint = {
+                x: (circle.center.x + nearest.point.x) / 2,
+                y: (circle.center.y + nearest.point.y) / 2
+            };
+        } else {
+            midPoint = { x: circle.center.x, y: circle.center.y };
+        }
+        return { clearance: dist, position: midPoint };
+    }
+
+    function polygonSegmentClearance(polygon, segment) {
+        const mid = {
+            x: (segment.start.x + segment.end.x) / 2,
+            y: (segment.start.y + segment.end.y) / 2
+        };
+        if (Geometry.isPointInPolygon(mid, polygon.points) ||
+            Geometry.isPointInPolygon(segment.start, polygon.points) ||
+            Geometry.isPointInPolygon(segment.end, polygon.points)) {
+            return { clearance: Infinity, position: null };
+        }
+        const dist = Geometry.segmentToPolygonDistance(segment.start, segment.end, polygon.points) - segment.halfWidth;
+        return { clearance: Math.max(0, dist), position: mid };
+    }
+
+    function polygonPolygonClearance(poly1, poly2) {
+        for (const p of poly1.points) {
+            if (Geometry.isPointInPolygon(p, poly2.points)) {
+                return { clearance: Infinity, position: null };
+            }
+        }
+        for (const p of poly2.points) {
+            if (Geometry.isPointInPolygon(p, poly1.points)) {
+                return { clearance: Infinity, position: null };
+            }
+        }
+        let minDist = Infinity;
+        let bestPoint = null;
+        const n1 = poly1.points.length;
+        const n2 = poly2.points.length;
+        for (let i = 0; i < n1; i++) {
+            const j = (i + 1) % n1;
+            for (let k = 0; k < n2; k++) {
+                const l = (k + 1) % n2;
+                const d = Geometry.segmentSegmentDistance(
+                    poly1.points[i], poly1.points[j],
+                    poly2.points[k], poly2.points[l]
+                );
+                if (d < minDist) {
+                    minDist = d;
+                    bestPoint = {
+                        x: (poly1.points[i].x + poly2.points[k].x) / 2,
+                        y: (poly1.points[i].y + poly2.points[k].y) / 2
+                    };
+                }
+            }
+        }
+        return { clearance: minDist, position: bestPoint };
     }
 
     function circleCircleClearance(c1, c2) {

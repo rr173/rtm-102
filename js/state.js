@@ -3,6 +3,7 @@ const PCBState = (function() {
         pads: [],
         tracks: [],
         vias: [],
+        copperPours: [],
         nextId: 1
     };
 
@@ -55,6 +56,66 @@ const PCBState = (function() {
         state.pads = [];
         state.tracks = [];
         state.vias = [];
+        state.copperPours = [];
+    }
+
+    function addCopperPour(pour) {
+        saveSnapshot();
+        const newPour = {
+            id: genId(),
+            type: 'copperPour',
+            net: pour.net || 'NET1',
+            layer: pour.layer || 'front',
+            points: pour.points.map(p => ({ x: p.x, y: p.y })),
+            clearance: pour.clearance !== undefined ? pour.clearance : 0.3
+        };
+        state.copperPours.push(newPour);
+        return newPour;
+    }
+
+    function updateCopperPour(id, updates) {
+        saveSnapshot();
+        const pour = state.copperPours.find(p => p.id === id);
+        if (pour) {
+            Object.assign(pour, updates);
+            if (updates.points) {
+                pour.points = updates.points.map(p => ({ x: p.x, y: p.y }));
+            }
+        }
+        return pour;
+    }
+
+    function removeCopperPour(id) {
+        saveSnapshot();
+        const idx = state.copperPours.findIndex(p => p.id === id);
+        if (idx >= 0) {
+            state.copperPours.splice(idx, 1);
+        }
+    }
+
+    function findCopperPourAt(point, layer = null, tolerance = 0.5) {
+        for (let i = state.copperPours.length - 1; i >= 0; i--) {
+            const pour = state.copperPours[i];
+            if (layer && pour.layer !== layer) continue;
+            if (Geometry.isPointInPolygon(point, pour.points)) {
+                return pour;
+            }
+            if (Geometry.pointToPolygonEdgeDistance(point, pour.points) <= tolerance) {
+                return pour;
+            }
+        }
+        return null;
+    }
+
+    function findCopperPourVertexAt(point, tolerance = 0.5) {
+        for (let i = state.copperPours.length - 1; i >= 0; i--) {
+            const pour = state.copperPours[i];
+            const vertex = Geometry.findNearestPolygonVertex(point, pour.points, tolerance);
+            if (vertex) {
+                return { pour, vertexIndex: vertex.index, point: vertex.point };
+            }
+        }
+        return null;
     }
 
     function genId() {
@@ -239,6 +300,8 @@ const PCBState = (function() {
         if (via) return { type: 'via', element: via };
         const track = findTrackAt(point, layer);
         if (track) return { type: 'track', element: track };
+        const pour = findCopperPourAt(point, layer);
+        if (pour) return { type: 'copperPour', element: pour };
         return null;
     }
 
@@ -359,6 +422,22 @@ const PCBState = (function() {
         state.vias = [
             { id: genId(), type: 'via', net: 'NET2', x: 50, y: 50, diameter: 0.6, hole: 0.3, layers: ['front', 'back'] }
         ];
+
+        state.copperPours = [
+            {
+                id: genId(),
+                type: 'copperPour',
+                net: 'NET1',
+                layer: 'front',
+                clearance: 0.3,
+                points: [
+                    { x: 50, y: 5 },
+                    { x: 95, y: 5 },
+                    { x: 95, y: 75 },
+                    { x: 50, y: 75 }
+                ]
+            }
+        ];
     }
 
     return {
@@ -374,10 +453,15 @@ const PCBState = (function() {
         addVia,
         updateVia,
         removeVia,
+        addCopperPour,
+        updateCopperPour,
+        removeCopperPour,
         findPadAt,
         findViaAt,
         findTrackAt,
         findTrackEndpointAt,
+        findCopperPourAt,
+        findCopperPourVertexAt,
         findElementAt,
         movePad,
         getPadsByNet,

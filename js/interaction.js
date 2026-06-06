@@ -84,6 +84,8 @@ const Interaction = (function() {
             handleTrackMouseDown(snapped);
         } else if (tool === 'via') {
             handleViaMouseDown(snapped);
+        } else if (tool === 'copper') {
+            handleCopperPourMouseDown(snapped);
         }
 
         refreshUI();
@@ -148,6 +150,10 @@ const Interaction = (function() {
                 cur = p;
             }
             document.getElementById('track-length').textContent = totalLen.toFixed(2) + ' mm';
+        }
+
+        const drawingCopper = Render.getInteractionState().drawingCopperPour;
+        if (tool === 'copper' && drawingCopper) {
         }
 
         updateCoordDisplay(worldPos);
@@ -217,11 +223,13 @@ const Interaction = (function() {
         const pad = PCBState.findPadAt(worldPos);
         const via = PCBState.findViaAt(worldPos);
         const track = PCBState.findTrackAt(worldPos, view.displayLayers === 'both' ? null : view.currentLayer);
+        const pour = PCBState.findCopperPourAt(worldPos, view.displayLayers === 'both' ? null : view.currentLayer);
 
         let target = null;
         if (pad) target = { type: 'pad', element: pad };
         else if (via) target = { type: 'via', element: via };
         else if (track) target = { type: 'track', element: track };
+        else if (pour) target = { type: 'copperPour', element: pour };
 
         if (!target) {
             hideContextMenu();
@@ -234,19 +242,28 @@ const Interaction = (function() {
         const menu = document.getElementById('context-menu');
         document.getElementById('context-menu-title').textContent =
             target.type === 'pad' ? '焊盘属性' :
-            target.type === 'via' ? '过孔属性' : '走线属性';
+            target.type === 'via' ? '过孔属性' :
+            target.type === 'copperPour' ? '铜区属性' : '走线属性';
 
         document.getElementById('context-net').value = target.element.net;
 
         const padGroup = document.getElementById('context-pad-group');
         const holeGroup = document.getElementById('context-hole-group');
+        const clearanceGroup = document.getElementById('context-clearance-group');
 
         if (target.type === 'track') {
             padGroup.style.display = 'none';
             holeGroup.style.display = 'none';
+            clearanceGroup.style.display = 'none';
+        } else if (target.type === 'copperPour') {
+            padGroup.style.display = 'none';
+            holeGroup.style.display = 'none';
+            clearanceGroup.style.display = 'flex';
+            document.getElementById('context-clearance').value = target.element.clearance;
         } else {
             padGroup.style.display = 'flex';
             holeGroup.style.display = 'flex';
+            clearanceGroup.style.display = 'none';
             document.getElementById('context-diameter').value = target.element.diameter;
             document.getElementById('context-hole').value = target.element.hole;
         }
@@ -262,6 +279,10 @@ const Interaction = (function() {
         const drawingTrack = Render.getInteractionState().drawingTrack;
         if (drawingTrack) {
             finishTrack();
+        }
+        const drawingCopper = Render.getInteractionState().drawingCopperPour;
+        if (drawingCopper) {
+            finishCopperPour();
         }
     }
 
@@ -299,6 +320,10 @@ const Interaction = (function() {
             if (drawingTrack) {
                 cancelTrack();
             }
+            const drawingCopper = Render.getInteractionState().drawingCopperPour;
+            if (drawingCopper) {
+                cancelCopperPour();
+            }
             Render.setSelectedElement(null);
             hideContextMenu();
             Render.render();
@@ -323,6 +348,7 @@ const Interaction = (function() {
         if (e.code === 'KeyS') selectTool('select');
         else if (e.code === 'KeyP') selectTool('pad');
         else if (e.code === 'KeyT') selectTool('track');
+        else if (e.code === 'KeyC') selectTool('copper');
     }
 
     function onKeyUp(e) {
@@ -344,17 +370,30 @@ const Interaction = (function() {
         const pad = PCBState.findPadAt(pos);
         const via = PCBState.findViaAt(pos);
         const track = PCBState.findTrackAt(pos, view.displayLayers === 'both' ? null : view.currentLayer);
+        const pourVertex = PCBState.findCopperPourVertexAt(pos);
+        const pour = !pourVertex ? PCBState.findCopperPourAt(pos, view.displayLayers === 'both' ? null : view.currentLayer) : null;
 
         let target = null;
         if (pad) target = { type: 'pad', element: pad };
         else if (via) target = { type: 'via', element: via };
         else if (track) target = { type: 'track', element: track };
+        else if (pourVertex) target = { type: 'copperPour', element: pourVertex.pour };
+        else if (pour) target = { type: 'copperPour', element: pour };
 
-        if (target && (target.type === 'pad' || target.type === 'via')) {
+        if ((target && target.type === 'pad') || (target && target.type === 'via')) {
             Render.setDragState({
                 type: target.type,
                 id: target.element.id,
                 startPos: { x: target.element.x, y: target.element.y }
+            });
+        }
+
+        if (pourVertex) {
+            Render.setDragState({
+                type: 'copperPourVertex',
+                id: pourVertex.pour.id,
+                vertexIndex: pourVertex.vertexIndex,
+                startPos: { x: pourVertex.point.x, y: pourVertex.point.y }
             });
         }
 
@@ -367,6 +406,18 @@ const Interaction = (function() {
 
         if (dragState.type === 'pad') {
             PCBState.movePad(dragState.id, pos);
+        } else if (dragState.type === 'copperPourVertex') {
+            const state = PCBState.getState();
+            const pour = state.copperPours.find(p => p.id === dragState.id);
+            if (pour) {
+                const newPoints = pour.points.map((p, i) => {
+                    if (i === dragState.vertexIndex) {
+                        return { x: pos.x, y: pos.y };
+                    }
+                    return { x: p.x, y: p.y };
+                });
+                PCBState.updateCopperPour(dragState.id, { points: newPoints });
+            }
         }
     }
 
@@ -450,6 +501,56 @@ const Interaction = (function() {
         postChangeRefresh();
     }
 
+    function handleCopperPourMouseDown(pos) {
+        const view = Render.getViewState();
+        const drawingCopper = Render.getInteractionState().drawingCopperPour;
+
+        if (!drawingCopper) {
+            if (!isInsideBoard(pos)) return;
+
+            const pour = {
+                net: document.getElementById('net-select').value,
+                layer: view.currentLayer,
+                points: [pos],
+                clearance: parseFloat(document.getElementById('drc-clearance').value) || 0.3
+            };
+            Render.setDrawingCopperPour(pour);
+        } else {
+            const firstPoint = drawingCopper.points[0];
+            const distToFirst = Geometry.dist(pos, firstPoint);
+
+            if (drawingCopper.points.length >= 2 && distToFirst < 0.8) {
+                finishCopperPour();
+                return;
+            } else {
+                drawingCopper.points.push({ x: pos.x, y: pos.y });
+                Render.setDrawingCopperPour(drawingCopper);
+            }
+        }
+    }
+
+    function finishCopperPour() {
+        const drawingCopper = Render.getInteractionState().drawingCopperPour;
+        if (!drawingCopper) return;
+
+        if (drawingCopper.points.length >= 3) {
+            PCBState.addCopperPour({
+                net: drawingCopper.net,
+                layer: drawingCopper.layer,
+                points: drawingCopper.points,
+                clearance: drawingCopper.clearance
+            });
+        }
+
+        cancelCopperPour();
+        postChangeRefresh();
+    }
+
+    function cancelCopperPour() {
+        Render.setDrawingCopperPour(null);
+        Render.render();
+    }
+
     function insertViaAndSwitchLayer() {
         const drawingTrack = Render.getInteractionState().drawingTrack;
         if (!drawingTrack || drawingTrack.points.length < 1) return;
@@ -504,6 +605,8 @@ const Interaction = (function() {
             PCBState.removeVia(sel.element.id);
         } else if (sel.type === 'track') {
             PCBState.removeTrack(sel.element.id);
+        } else if (sel.type === 'copperPour') {
+            PCBState.removeCopperPour(sel.element.id);
         }
 
         Render.setSelectedElement(null);
@@ -527,6 +630,21 @@ const Interaction = (function() {
             }
         }
 
+        const drawingCopper = Render.getInteractionState().drawingCopperPour;
+        if (drawingCopper && tool !== 'copper') {
+            if (drawingCopper.points.length >= 3) {
+                PCBState.addCopperPour({
+                    net: drawingCopper.net,
+                    layer: drawingCopper.layer,
+                    points: drawingCopper.points,
+                    clearance: drawingCopper.clearance
+                });
+                postChangeRefresh();
+            } else {
+                cancelCopperPour();
+            }
+        }
+
         Render.setCurrentTool(tool);
         updateToolButtons();
         Render.render();
@@ -541,7 +659,7 @@ const Interaction = (function() {
         const btn = document.getElementById('tool-' + tool);
         if (btn) btn.classList.add('active');
 
-        const toolNames = { select: '选择', pad: '焊盘', track: '走线', via: '过孔' };
+        const toolNames = { select: '选择', pad: '焊盘', track: '走线', via: '过孔', copper: '铜区' };
         document.getElementById('current-tool').textContent = toolNames[tool] || tool;
     }
 
@@ -599,6 +717,7 @@ const Interaction = (function() {
         document.getElementById('tool-pad').addEventListener('click', () => selectTool('pad'));
         document.getElementById('tool-track').addEventListener('click', () => selectTool('track'));
         document.getElementById('tool-via').addEventListener('click', () => selectTool('via'));
+        document.getElementById('tool-copper').addEventListener('click', () => selectTool('copper'));
 
         document.getElementById('layer-front').addEventListener('click', () => {
             Render.setDisplayLayers('front');
@@ -679,6 +798,11 @@ const Interaction = (function() {
                 });
             } else if (contextMenuTarget.type === 'track') {
                 PCBState.updateTrack(contextMenuTarget.element.id, { net: net });
+            } else if (contextMenuTarget.type === 'copperPour') {
+                PCBState.updateCopperPour(contextMenuTarget.element.id, {
+                    net: net,
+                    clearance: parseFloat(document.getElementById('context-clearance').value)
+                });
             }
             hideContextMenu();
             postChangeRefresh();

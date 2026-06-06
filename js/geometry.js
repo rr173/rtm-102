@@ -278,6 +278,85 @@ const Geometry = (function() {
         return segs;
     }
 
+    function isPointInPolygon(point, polygon) {
+        if (!polygon || polygon.length < 3) return false;
+        let inside = false;
+        const n = polygon.length;
+        let j = n - 1;
+        for (let i = 0; i < n; j = i++) {
+            const xi = polygon[i].x, yi = polygon[i].y;
+            const xj = polygon[j].x, yj = polygon[j].y;
+            if (((yi > point.y) !== (yj > point.y)) &&
+                (point.x < (xj - xi) * (point.y - yi) / (yj - yi + EPSILON) + xi)) {
+                inside = !inside;
+            }
+        }
+        return inside;
+    }
+
+    function pointToPolygonDistance(point, polygon) {
+        if (!polygon || polygon.length === 0) return Infinity;
+        if (isPointInPolygon(point, polygon)) return 0;
+        let minDist = Infinity;
+        const n = polygon.length;
+        for (let i = 0; i < n; i++) {
+            const j = (i + 1) % n;
+            const d = pointToSegmentDistance(point, polygon[i], polygon[j]);
+            if (d < minDist) minDist = d;
+        }
+        return minDist;
+    }
+
+    function segmentToPolygonDistance(segStart, segEnd, polygon) {
+        if (!polygon || polygon.length < 3) return Infinity;
+        let minDist = Infinity;
+        const n = polygon.length;
+        for (let i = 0; i < n; i++) {
+            const j = (i + 1) % n;
+            if (segmentsIntersect(segStart, segEnd, polygon[i], polygon[j])) {
+                return 0;
+            }
+            const d = segmentSegmentDistance(segStart, segEnd, polygon[i], polygon[j]);
+            if (d < minDist) minDist = d;
+        }
+        const mid = { x: (segStart.x + segEnd.x) / 2, y: (segStart.y + segEnd.y) / 2 };
+        if (isPointInPolygon(mid, polygon)) return 0;
+        if (isPointInPolygon(segStart, polygon) || isPointInPolygon(segEnd, polygon)) return 0;
+        return minDist;
+    }
+
+    function circleToPolygonDistance(center, radius, polygon) {
+        if (!polygon || polygon.length < 3) return Infinity;
+        const distToPoly = pointToPolygonDistance(center, polygon);
+        return Math.max(0, distToPoly - radius);
+    }
+
+    function findNearestPolygonVertex(point, polygon, tolerance = 0.5) {
+        if (!polygon) return null;
+        let minDist = tolerance;
+        let nearestIdx = -1;
+        for (let i = 0; i < polygon.length; i++) {
+            const d = dist(point, polygon[i]);
+            if (d <= minDist) {
+                minDist = d;
+                nearestIdx = i;
+            }
+        }
+        return nearestIdx >= 0 ? { index: nearestIdx, point: polygon[nearestIdx] } : null;
+    }
+
+    function pointToPolygonEdgeDistance(point, polygon) {
+        if (!polygon || polygon.length < 2) return Infinity;
+        let minDist = Infinity;
+        const n = polygon.length;
+        for (let i = 0; i < n; i++) {
+            const j = (i + 1) % n;
+            const d = pointToSegmentDistance(point, polygon[i], polygon[j]);
+            if (d < minDist) minDist = d;
+        }
+        return minDist;
+    }
+
     return {
         dist,
         distSq,
@@ -302,6 +381,12 @@ const Geometry = (function() {
         computeOctilinearPathSimple,
         isPointOnPolyline,
         findNearestPointOnPolyline,
-        polylineSegments
+        polylineSegments,
+        isPointInPolygon,
+        pointToPolygonDistance,
+        segmentToPolygonDistance,
+        circleToPolygonDistance,
+        findNearestPolygonVertex,
+        pointToPolygonEdgeDistance
     };
 })();

@@ -9,8 +9,10 @@ const Render = (function() {
         gridMajor: 'rgba(255, 255, 255, 0.15)',
         front: '#e74c3c',
         frontDim: 'rgba(231, 76, 60, 0.3)',
+        frontPour: 'rgba(231, 76, 60, 0.35)',
         back: '#3498db',
         backDim: 'rgba(52, 152, 199, 0.3)',
+        backPour: 'rgba(52, 152, 199, 0.35)',
         pad: '#f1c40f',
         padHole: '#2c3e50',
         via: '#ecf0f1',
@@ -22,6 +24,7 @@ const Render = (function() {
         selection: '#f39c12',
         highlight: 'rgba(243, 156, 18, 0.3)',
         ghost: 'rgba(255, 255, 255, 0.4)',
+        thermal: '#e67e22',
         netColors: {
             'NET1': '#e74c3c',
             'NET2': '#3498db',
@@ -47,6 +50,7 @@ const Render = (function() {
         hoverPoint: null,
         selectedElement: null,
         drawingTrack: null,
+        drawingCopperPour: null,
         ghostPad: null,
         ghostVia: null,
         dragState: null
@@ -130,6 +134,10 @@ const Render = (function() {
         interactionState.dragState = state;
     }
 
+    function setDrawingCopperPour(pour) {
+        interactionState.drawingCopperPour = pour;
+    }
+
     function worldToScreen(point) {
         return {
             x: point.x * viewState.scale + viewState.offsetX,
@@ -205,6 +213,8 @@ const Render = (function() {
 
         drawDrawingTrack();
 
+        drawDrawingCopperPour();
+
         drawSelection();
 
         if (interactionState.hoverPoint) {
@@ -262,6 +272,11 @@ const Render = (function() {
         const state = PCBState.getState();
         const isCurrent = layer === viewState.currentLayer;
         const opacity = dimmed && !isCurrent ? 0.3 : 1.0;
+
+        for (const pour of state.copperPours) {
+            if (pour.layer !== layer) continue;
+            drawCopperPour(pour, opacity);
+        }
 
         for (const track of state.tracks) {
             if (track.layer !== layer) continue;
@@ -557,6 +572,222 @@ const Render = (function() {
                 ctx.fillStyle = COLORS.selection;
                 ctx.fill();
             }
+        } else if (sel.type === 'copperPour') {
+            const pour = sel.element;
+            ctx.strokeStyle = COLORS.selection;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([4, 3]);
+            ctx.globalAlpha = 0.8;
+            ctx.beginPath();
+            const pts = pour.points;
+            if (pts && pts.length > 0) {
+                const first = worldToScreen(pts[0]);
+                ctx.moveTo(first.x, first.y);
+                for (let i = 1; i < pts.length; i++) {
+                    const sp = worldToScreen(pts[i]);
+                    ctx.lineTo(sp.x, sp.y);
+                }
+                ctx.closePath();
+                ctx.stroke();
+            }
+            ctx.setLineDash([]);
+            ctx.globalAlpha = 1;
+
+            for (const p of pts) {
+                const sp = worldToScreen(p);
+                const handleSize = Math.max(4, viewState.scale * 0.4);
+                ctx.fillStyle = COLORS.selection;
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 1;
+                ctx.fillRect(sp.x - handleSize, sp.y - handleSize, handleSize * 2, handleSize * 2);
+                ctx.strokeRect(sp.x - handleSize, sp.y - handleSize, handleSize * 2, handleSize * 2);
+            }
+        }
+
+        ctx.restore();
+    }
+
+    function buildPolygonPath(points) {
+        if (!points || points.length < 3) return;
+        const first = worldToScreen(points[0]);
+        ctx.moveTo(first.x, first.y);
+        for (let i = 1; i < points.length; i++) {
+            const p = worldToScreen(points[i]);
+            ctx.lineTo(p.x, p.y);
+        }
+        ctx.closePath();
+    }
+
+    function drawCopperPour(pour, opacity = 1.0) {
+        if (pour.points.length < 3) return;
+        const state = PCBState.getState();
+
+        ctx.save();
+        ctx.globalAlpha = opacity;
+
+        const pourColor = pour.layer === 'front' ? COLORS.frontPour : COLORS.backPour;
+        ctx.fillStyle = pourColor;
+        ctx.beginPath();
+        buildPolygonPath(pour.points);
+        ctx.fill();
+
+        ctx.globalCompositeOperation = 'destination-out';
+        const clearance = pour.clearance;
+
+        for (const track of state.tracks) {
+            if (track.layer !== pour.layer) continue;
+            if (track.net === pour.net) continue;
+            if (track.points.length < 2) continue;
+            for (let i = 0; i < track.points.length - 1; i++) {
+                const start = track.points[i];
+                const end = track.points[i + 1];
+                drawTrackClearance(start, end, track.width, clearance);
+            }
+        }
+
+        for (const pad of state.pads) {
+            if (pad.net === pour.net) continue;
+            drawCircleClearance(pad, pad.diameter / 2, clearance);
+        }
+
+        for (const via of state.vias) {
+            if (via.net === pour.net) continue;
+            drawCircleClearance(via, via.diameter / 2, clearance);
+        }
+
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.restore();
+
+        for (const pad of state.pads) {
+            if (pad.net === pour.net && Geometry.isPointInPolygon(pad, pour.points)) {
+                drawThermalRelief(pad, pour);
+            }
+        }
+
+        for (const via of state.vias) {
+            if (via.net === pour.net && Geometry.isPointInPolygon(via, pour.points)) {
+                drawThermalRelief(via, pour);
+            }
+        }
+
+        ctx.save();
+        ctx.globalAlpha = opacity;
+        const borderColor = pour.layer === 'front' ? COLORS.front : COLORS.back;
+        ctx.strokeStyle = borderColor;
+        ctx.lineWidth = Math.max(1, viewState.scale * 0.08);
+        ctx.globalAlpha = opacity * 0.6;
+        ctx.beginPath();
+        buildPolygonPath(pour.points);
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    function drawTrackClearance(start, end, width, clearance) {
+        const totalWidth = width + clearance * 2;
+        const pixelWidth = Math.max(1, totalWidth * viewState.scale);
+        ctx.lineWidth = pixelWidth;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        const s = worldToScreen(start);
+        const e = worldToScreen(end);
+        ctx.beginPath();
+        ctx.moveTo(s.x, s.y);
+        ctx.lineTo(e.x, e.y);
+        ctx.stroke();
+    }
+
+    function drawCircleClearance(circle, radius, clearance) {
+        const totalRadius = radius + clearance;
+        const center = worldToScreen(circle);
+        const pixelRadius = Math.max(0.5, totalRadius * viewState.scale);
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, pixelRadius, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    function drawThermalRelief(padOrVia, pour) {
+        const center = worldToScreen(padOrVia);
+        const padRadius = padOrVia.diameter / 2;
+        const thermalWidth = 0.25;
+        const gapAngle = Math.PI / 2;
+        const spokeAngleStep = Math.PI / 2;
+
+        ctx.save();
+        const pourColor = pour.layer === 'front' ? COLORS.front : COLORS.back;
+        ctx.strokeStyle = pourColor;
+        ctx.lineWidth = Math.max(1, thermalWidth * viewState.scale);
+        ctx.lineCap = 'butt';
+
+        const innerR = padRadius * viewState.scale;
+        const outerR = (padRadius + pour.clearance + 0.8) * viewState.scale;
+
+        for (let i = 0; i < 4; i++) {
+            const angle = i * spokeAngleStep;
+            const ix = center.x + Math.cos(angle) * innerR;
+            const iy = center.y + Math.sin(angle) * innerR;
+            const ox = center.x + Math.cos(angle) * outerR;
+            const oy = center.y + Math.sin(angle) * outerR;
+
+            ctx.beginPath();
+            ctx.moveTo(ix, iy);
+            ctx.lineTo(ox, oy);
+            ctx.stroke();
+        }
+
+        ctx.restore();
+    }
+
+    function drawDrawingCopperPour() {
+        if (!interactionState.drawingCopperPour) return;
+        const pour = interactionState.drawingCopperPour;
+        if (pour.points.length < 1) return;
+
+        ctx.save();
+
+        const layerColor = pour.layer === 'front' ? COLORS.front : COLORS.back;
+
+        if (pour.points.length >= 2) {
+            ctx.strokeStyle = layerColor;
+            ctx.lineWidth = 2;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.globalAlpha = 0.8;
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath();
+            const first = worldToScreen(pour.points[0]);
+            ctx.moveTo(first.x, first.y);
+            for (let i = 1; i < pour.points.length; i++) {
+                const p = worldToScreen(pour.points[i]);
+                ctx.lineTo(p.x, p.y);
+            }
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        if (pour.points.length >= 2 && interactionState.hoverPoint) {
+            ctx.strokeStyle = layerColor;
+            ctx.lineWidth = 2;
+            ctx.globalAlpha = 0.4;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            const last = worldToScreen(pour.points[pour.points.length - 1]);
+            const first = worldToScreen(pour.points[0]);
+            const hover = worldToScreen(interactionState.hoverPoint);
+            ctx.moveTo(last.x, last.y);
+            ctx.lineTo(hover.x, hover.y);
+            ctx.lineTo(first.x, first.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        for (let i = 0; i < pour.points.length; i++) {
+            const sp = worldToScreen(pour.points[i]);
+            const size = Math.max(3, viewState.scale * 0.4);
+            ctx.fillStyle = COLORS.selection;
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1;
+            ctx.fillRect(sp.x - size, sp.y - size, size * 2, size * 2);
+            ctx.strokeRect(sp.x - size, sp.y - size, size * 2, size * 2);
         }
 
         ctx.restore();
@@ -606,6 +837,7 @@ const Render = (function() {
         setHoverPoint,
         setSelectedElement,
         setDrawingTrack,
+        setDrawingCopperPour,
         setGhostPad,
         setGhostVia,
         setDragState,
