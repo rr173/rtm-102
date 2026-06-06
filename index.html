@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PCB布线规划编辑器</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <div class="toolbar">
+            <div class="toolbar-group">
+                <button class="tool-btn" id="tool-select" title="选择工具 (S)">
+                    <span class="icon">▢</span>
+                    <span class="label">选择</span>
+                </button>
+                <button class="tool-btn active" id="tool-pad" title="放置焊盘 (P)">
+                    <span class="icon">◉</span>
+                    <span class="label">焊盘</span>
+                </button>
+                <button class="tool-btn" id="tool-track" title="绘制走线 (T)">
+                    <span class="icon">╱</span>
+                    <span class="label">走线</span>
+                </button>
+                <button class="tool-btn" id="tool-via" title="放置过孔 (V)">
+                    <span class="icon">◎</span>
+                    <span class="label">过孔</span>
+                </button>
+            </div>
+
+            <div class="toolbar-separator"></div>
+
+            <div class="toolbar-group">
+                <button class="tool-btn layer-btn active" id="layer-front" title="正面层">
+                    <span class="layer-dot" style="background:#e74c3c;"></span>
+                    <span class="label">正面</span>
+                </button>
+                <button class="tool-btn layer-btn" id="layer-back" title="背面层">
+                    <span class="layer-dot" style="background:#3498db;"></span>
+                    <span class="label">背面</span>
+                </button>
+                <button class="tool-btn layer-btn" id="layer-both" title="双面显示">
+                    <span class="layer-dot" style="background:linear-gradient(90deg,#e74c3c 50%,#3498db 50%);"></span>
+                    <span class="label">双面</span>
+                </button>
+            </div>
+
+            <div class="toolbar-separator"></div>
+
+            <div class="toolbar-group">
+                <label class="toolbar-label">网格:</label>
+                <button class="tool-btn grid-btn" id="grid-toggle" title="网格开关">
+                    <span class="label">显示</span>
+                </button>
+                <select id="grid-size" class="toolbar-select">
+                    <option value="0.1">0.1mm</option>
+                    <option value="0.25">0.25mm</option>
+                    <option value="0.5" selected>0.5mm</option>
+                    <option value="1">1mm</option>
+                </select>
+            </div>
+
+            <div class="toolbar-separator"></div>
+
+            <div class="toolbar-group">
+                <button class="tool-btn active" id="drc-toggle" title="DRC检查开关">
+                    <span class="icon">✓</span>
+                    <span class="label">DRC</span>
+                </button>
+                <label class="toolbar-label">间距:</label>
+                <input type="number" id="drc-clearance" class="toolbar-input" value="0.2" min="0.05" max="2" step="0.05" title="最小间距(mm)">
+                <span class="toolbar-label">mm</span>
+            </div>
+
+            <div class="toolbar-separator"></div>
+
+            <div class="toolbar-group">
+                <label class="toolbar-label">线宽:</label>
+                <input type="number" id="track-width" class="toolbar-input" value="0.25" min="0.1" max="2" step="0.05" title="走线宽度(mm)">
+                <span class="toolbar-label">mm</span>
+            </div>
+
+            <div class="toolbar-group">
+                <label class="toolbar-label">焊盘:</label>
+                <input type="number" id="pad-diameter" class="toolbar-input" value="1.6" min="0.5" max="5" step="0.1" title="焊盘直径(mm)">
+                <span class="toolbar-label">/</span>
+                <input type="number" id="pad-hole" class="toolbar-input" value="0.8" min="0.2" max="3" step="0.1" title="内孔径(mm)">
+                <span class="toolbar-label">mm</span>
+            </div>
+
+            <div class="toolbar-separator"></div>
+
+            <div class="toolbar-group">
+                <label class="toolbar-label">网络:</label>
+                <select id="net-select" class="toolbar-select">
+                    <option value="NET1">NET1</option>
+                    <option value="NET2">NET2</option>
+                    <option value="NET3">NET3</option>
+                    <option value="NET4">NET4</option>
+                    <option value="NET5">NET5</option>
+                </select>
+            </div>
+
+            <div class="toolbar-spacer"></div>
+
+            <div class="toolbar-group">
+                <button class="tool-btn" id="btn-undo" title="撤销 (Ctrl+Z)">
+                    <span class="icon">↶</span>
+                </button>
+                <button class="tool-btn" id="btn-redo" title="重做 (Ctrl+Y)">
+                    <span class="icon">↷</span>
+                </button>
+                <button class="tool-btn" id="btn-clear" title="清空画布">
+                    <span class="icon">🗑</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="canvas-container">
+            <canvas id="pcb-canvas"></canvas>
+            <div class="coordinate-display">
+                <span id="zoom-level">100%</span>
+                <span class="coord-separator">|</span>
+                <span id="mouse-pos">X: 0.00, Y: 0.00 mm</span>
+            </div>
+        </div>
+
+        <div class="status-bar">
+            <div class="status-item">
+                <span class="status-label">DRC违规:</span>
+                <span id="drc-count" class="status-value ok">0</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">最小间距:</span>
+                <span id="drc-min" class="status-value">0.20 mm</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">当前层:</span>
+                <span id="current-layer" class="status-value">正面</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">当前工具:</span>
+                <span id="current-tool" class="status-value">焊盘</span>
+            </div>
+            <div class="status-item" id="track-length-display" style="display:none;">
+                <span class="status-label">当前段长:</span>
+                <span id="track-length" class="status-value">0.00 mm</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="context-menu" id="context-menu">
+        <div class="context-menu-title" id="context-menu-title">属性设置</div>
+        <div class="context-menu-item">
+            <label>网络</label>
+            <select id="context-net">
+                <option value="NET1">NET1</option>
+                <option value="NET2">NET2</option>
+                <option value="NET3">NET3</option>
+                <option value="NET4">NET4</option>
+                <option value="NET5">NET5</option>
+            </select>
+        </div>
+        <div class="context-menu-item" id="context-pad-group">
+            <label>直径(mm)</label>
+            <input type="number" id="context-diameter" min="0.5" max="5" step="0.1" value="1.6">
+        </div>
+        <div class="context-menu-item" id="context-hole-group">
+            <label>内孔(mm)</label>
+            <input type="number" id="context-hole" min="0.2" max="3" step="0.1" value="0.8">
+        </div>
+        <div class="context-menu-actions">
+            <button id="context-apply">应用</button>
+            <button id="context-cancel">取消</button>
+            <button id="context-delete" class="danger">删除</button>
+        </div>
+    </div>
+
+    <script src="js/geometry.js"></script>
+    <script src="js/state.js"></script>
+    <script src="js/drc.js"></script>
+    <script src="js/render.js"></script>
+    <script src="js/interaction.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>
