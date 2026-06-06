@@ -69,7 +69,17 @@ function dbAll(sql, params = []) {
       FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE
     )
   `);
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS design_rules (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      constraints_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  `);
   await initDemoBoard();
+  await initDemoRules();
   server.listen(PORT, () => {
     console.log(`PCB Editor server listening on port ${PORT}`);
   });
@@ -588,5 +598,504 @@ wss.on('connection', async (ws, req) => {
     }
     broadcastOnlineCount(boardId);
   });
+});
+
+const VALID_CONSTRAINT_TYPES = ['clearance', 'track_width', 'hole_size', 'pad_size'];
+const VALID_LAYERS = ['front', 'back', 'both'];
+
+function validateConstraint(c) {
+  if (!c || typeof c !== 'object') return 'constraint must be an object';
+  if (!VALID_CONSTRAINT_TYPES.includes(c.type)) return `invalid constraint type: ${c.type}, must be one of ${VALID_CONSTRAINT_TYPES.join(', ')}`;
+  if (!VALID_LAYERS.includes(c.layer)) return `invalid layer: ${c.layer}, must be one of ${VALID_LAYERS.join(', ')}`;
+  if (c.min === undefined || c.min === null || typeof c.min !== 'number') return 'min must be a number';
+  if (c.max !== undefined && c.max !== null && typeof c.max !== 'number') return 'max must be a number or null';
+  if (c.max !== undefined && c.max !== null && c.min > c.max) return 'min cannot be greater than max';
+  return null;
+}
+
+function validateConstraints(constraints) {
+  if (!Array.isArray(constraints)) return 'constraints must be an array';
+  const seen = new Set();
+  for (let i = 0; i < constraints.length; i++) {
+    const err = validateConstraint(constraints[i]);
+    if (err) return `constraints[${i}]: ${err}`;
+    const key = `${constraints[i].type}:${constraints[i].layer}`;
+    if (seen.has(key)) return `duplicate constraint: type=${constraints[i].type}, layer=${constraints[i].layer}`;
+    seen.add(key);
+  }
+  return null;
+}
+
+function formatRuleRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    constraints: JSON.parse(row.constraints_json),
+    created_at: row.created_at
+  };
+}
+
+async function initDemoRules() {
+  const countRow = await dbGet('SELECT COUNT(*) AS c FROM design_rules');
+  if (countRow.c > 0) return;
+  const now = Date.now();
+
+  const relaxedConstraints = [
+    { type: 'clearance', layer: 'both', min: 0.15, max: null },
+    { type: 'track_width', layer: 'both', min: 0.1, max: 2.0 }
+  ];
+  await dbRun(
+    'INSERT INTO design_rules (id, name, description, constraints_json, created_at) VALUES (?, ?, ?, ?, ?)',
+    ['relaxed', '宽松', '宽松的设计规则', JSON.stringify(relaxedConstraints), now]
+  );
+
+  const strictConstraints = [
+    { type: 'clearance', layer: 'both', min: 0.3, max: null },
+    { type: 'track_width', layer: 'both', min: 0.2, max: 1.0 },
+    { type: 'hole_size', layer: 'both', min: 0.3, max: 1.5 }
+  ];
+  await dbRun(
+    'INSERT INTO design_rules (id, name, description, constraints_json, created_at) VALUES (?, ?, ?, ?, ?)',
+    ['strict', '严格', '严格的设计规则', JSON.stringify(strictConstraints), now]
+  );
+}
+
+function pointDist(p1, p2) {
+  return Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
+}
+
+function pointToSegmentDist(pt, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 1e-12) return pointDist(pt, a);
+  let t = ((pt.x - a.x) * dx + (pt.y - a.y) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  return pointDist(pt, { x: a.x + t * dx, y: a.y + t * dy });
+}
+
+function segmentToSegmentDist(a1, a2, b1, b2) {
+  const d1 = pointToSegmentDist(a1, b1, b2);
+  const d2 = pointToSegmentDist(a2, b1, b2);
+  const d3 = pointToSegmentDist(b1, a1, a2);
+  const d4 = pointToSegmentDist(b2, a1, a2);
+  return Math.min(d1, d2, d3, d4);
+}
+
+function circleCircleDist(c1, c2) {
+  return pointDist(c1.center, c2.center) - c1.radius - c2.radius;
+}
+
+function circleSegmentDist(circle, segStart, segEnd, halfWidth) {
+  return pointToSegmentDist(circle.center, segStart, segEnd) - circle.radius - halfWidth;
+}
+
+function collectLayerElementsWithShape(state, layer) {
+  const elements = [];
+  for (const pad of state.pads || []) {
+    if (pad.layers && pad.layers.includes(layer)) {
+      elements.push({
+        id: pad.id,
+        type: 'pad',
+        net: pad.net,
+        layer,
+        shape: { type: 'circle', center: { x: pad.x, y: pad.y }, radius: pad.diameter / 2 },
+        diameter: pad.diameter,
+        hole: pad.hole
+      });
+    }
+  }
+  for (const via of state.vias || []) {
+    if (via.layers && via.layers.includes(layer)) {
+      elements.push({
+        id: via.id,
+        type: 'via',
+        net: via.net,
+        layer,
+        shape: { type: 'circle', center: { x: via.x, y: via.y }, radius: via.diameter / 2 },
+        diameter: via.diameter,
+        hole: via.hole
+      });
+    }
+  }
+  for (const track of state.tracks || []) {
+    if (track.layer !== layer) continue;
+    for (let i = 0; i < track.points.length - 1; i++) {
+      elements.push({
+        id: track.id,
+        type: 'track',
+        net: track.net,
+        layer,
+        shape: {
+          type: 'segment',
+          start: track.points[i],
+          end: track.points[i + 1],
+          halfWidth: track.width / 2
+        },
+        width: track.width,
+        segmentIndex: i
+      });
+    }
+  }
+  for (const pour of state.copperPours || []) {
+    if (pour.layer !== layer) continue;
+    elements.push({
+      id: pour.id,
+      type: 'copperPour',
+      net: pour.net,
+      layer,
+      shape: { type: 'polygon', points: pour.points, clearance: pour.clearance },
+      clearance: pour.clearance
+    });
+  }
+  return elements;
+}
+
+function computeShapeClearance(s1, s2) {
+  if (s1.type === 'circle' && s2.type === 'circle') {
+    return circleCircleDist(s1, s2);
+  }
+  if (s1.type === 'circle' && s2.type === 'segment') {
+    return circleSegmentDist(s1, s2.start, s2.end, s2.halfWidth);
+  }
+  if (s1.type === 'segment' && s2.type === 'circle') {
+    return circleSegmentDist(s2, s1.start, s1.end, s1.halfWidth);
+  }
+  if (s1.type === 'segment' && s2.type === 'segment') {
+    return segmentToSegmentDist(s1.start, s1.end, s2.start, s2.end) - s1.halfWidth - s2.halfWidth;
+  }
+  return Infinity;
+}
+
+function computeSeverity(actual, min, max) {
+  let deviation = 0;
+  if (min !== null && min !== undefined && actual < min) {
+    deviation = Math.abs(min - actual) / min;
+  } else if (max !== null && max !== undefined && actual > max) {
+    deviation = Math.abs(actual - max) / max;
+  }
+  return deviation > 0.2 ? 'error' : 'warning';
+}
+
+function checkClearance(state, constraint) {
+  const violations = [];
+  const layersToCheck = constraint.layer === 'both' ? ['front', 'back'] : [constraint.layer];
+  for (const layer of layersToCheck) {
+    const elements = collectLayerElementsWithShape(state, layer);
+    for (let i = 0; i < elements.length; i++) {
+      for (let j = i + 1; j < elements.length; j++) {
+        const e1 = elements[i];
+        const e2 = elements[j];
+        if (e1.net === e2.net) continue;
+        if (e1.type === 'track' && e2.type === 'track' && e1.id === e2.id) continue;
+        const actual = computeShapeClearance(e1.shape, e2.shape);
+        if (actual < constraint.min) {
+          violations.push({
+            constraint_type: 'clearance',
+            layer,
+            element_id: `${e1.type}_${e1.id}_${e2.type}_${e2.id}`,
+            element_type: `${e1.type}-${e2.type}`,
+            actual_value: Number(actual.toFixed(4)),
+            required_min: constraint.min,
+            required_max: constraint.max,
+            severity: computeSeverity(actual, constraint.min, constraint.max)
+          });
+        }
+      }
+    }
+  }
+  return violations;
+}
+
+function checkTrackWidth(state, constraint) {
+  const violations = [];
+  const layersToCheck = constraint.layer === 'both' ? ['front', 'back'] : [constraint.layer];
+  const seen = new Set();
+  for (const track of state.tracks || []) {
+    if (!layersToCheck.includes(track.layer)) continue;
+    if (seen.has(track.id)) continue;
+    seen.add(track.id);
+    const w = track.width;
+    const belowMin = w < constraint.min;
+    const aboveMax = constraint.max !== null && constraint.max !== undefined && w > constraint.max;
+    if (belowMin || aboveMax) {
+      violations.push({
+        constraint_type: 'track_width',
+        layer: track.layer,
+        element_id: `track_${track.id}`,
+        element_type: 'track',
+        actual_value: w,
+        required_min: constraint.min,
+        required_max: constraint.max,
+        severity: computeSeverity(w, constraint.min, constraint.max)
+      });
+    }
+  }
+  return violations;
+}
+
+function checkHoleSize(state, constraint) {
+  const violations = [];
+  const layersToCheck = constraint.layer === 'both' ? ['front', 'back'] : [constraint.layer];
+  for (const pad of state.pads || []) {
+    if (!pad.layers || !pad.layers.some(l => layersToCheck.includes(l))) continue;
+    const h = pad.hole;
+    const belowMin = h < constraint.min;
+    const aboveMax = constraint.max !== null && constraint.max !== undefined && h > constraint.max;
+    if (belowMin || aboveMax) {
+      violations.push({
+        constraint_type: 'hole_size',
+        layer: pad.layers.length > 1 ? 'both' : pad.layers[0],
+        element_id: `pad_${pad.id}`,
+        element_type: 'pad',
+        actual_value: h,
+        required_min: constraint.min,
+        required_max: constraint.max,
+        severity: computeSeverity(h, constraint.min, constraint.max)
+      });
+    }
+  }
+  for (const via of state.vias || []) {
+    if (!via.layers || !via.layers.some(l => layersToCheck.includes(l))) continue;
+    const h = via.hole;
+    const belowMin = h < constraint.min;
+    const aboveMax = constraint.max !== null && constraint.max !== undefined && h > constraint.max;
+    if (belowMin || aboveMax) {
+      violations.push({
+        constraint_type: 'hole_size',
+        layer: via.layers.length > 1 ? 'both' : via.layers[0],
+        element_id: `via_${via.id}`,
+        element_type: 'via',
+        actual_value: h,
+        required_min: constraint.min,
+        required_max: constraint.max,
+        severity: computeSeverity(h, constraint.min, constraint.max)
+      });
+    }
+  }
+  return violations;
+}
+
+function checkPadSize(state, constraint) {
+  const violations = [];
+  const layersToCheck = constraint.layer === 'both' ? ['front', 'back'] : [constraint.layer];
+  for (const pad of state.pads || []) {
+    if (!pad.layers || !pad.layers.some(l => layersToCheck.includes(l))) continue;
+    const d = pad.diameter;
+    const belowMin = d < constraint.min;
+    const aboveMax = constraint.max !== null && constraint.max !== undefined && d > constraint.max;
+    if (belowMin || aboveMax) {
+      violations.push({
+        constraint_type: 'pad_size',
+        layer: pad.layers.length > 1 ? 'both' : pad.layers[0],
+        element_id: `pad_${pad.id}`,
+        element_type: 'pad',
+        actual_value: d,
+        required_min: constraint.min,
+        required_max: constraint.max,
+        severity: computeSeverity(d, constraint.min, constraint.max)
+      });
+    }
+  }
+  return violations;
+}
+
+function runDRC(state, constraints) {
+  const allViolations = [];
+  for (const c of constraints) {
+    let violations = [];
+    switch (c.type) {
+      case 'clearance':
+        violations = checkClearance(state, c);
+        break;
+      case 'track_width':
+        violations = checkTrackWidth(state, c);
+        break;
+      case 'hole_size':
+        violations = checkHoleSize(state, c);
+        break;
+      case 'pad_size':
+        violations = checkPadSize(state, c);
+        break;
+    }
+    allViolations.push(...violations);
+  }
+  return allViolations;
+}
+
+app.post('/api/rules', async (req, res) => {
+  try {
+    const { name, description, constraints } = req.body || {};
+    if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
+    const err = validateConstraints(constraints);
+    if (err) return res.status(400).json({ error: err });
+    const id = uuidv4().replace(/-/g, '').substring(0, 12);
+    const now = Date.now();
+    await dbRun(
+      'INSERT INTO design_rules (id, name, description, constraints_json, created_at) VALUES (?, ?, ?, ?, ?)',
+      [id, name, description || '', JSON.stringify(constraints), now]
+    );
+    const row = await dbGet('SELECT * FROM design_rules WHERE id = ?', [id]);
+    res.status(201).json(formatRuleRow(row));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/rules', async (req, res) => {
+  try {
+    const rows = await dbAll('SELECT * FROM design_rules ORDER BY created_at DESC');
+    res.json(rows.map(formatRuleRow));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/rules/:id', async (req, res) => {
+  try {
+    const row = await dbGet('SELECT * FROM design_rules WHERE id = ?', [req.params.id]);
+    if (!row) return res.status(404).json({ error: 'Rule template not found' });
+    res.json(formatRuleRow(row));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put('/api/rules/:id', async (req, res) => {
+  try {
+    const existing = await dbGet('SELECT * FROM design_rules WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Rule template not found' });
+    const { name, description, constraints } = req.body || {};
+    let finalName = existing.name;
+    let finalDescription = existing.description;
+    let finalConstraints = JSON.parse(existing.constraints_json);
+    if (name !== undefined) {
+      if (typeof name !== 'string' || !name) return res.status(400).json({ error: 'name must be a non-empty string' });
+      finalName = name;
+    }
+    if (description !== undefined) {
+      finalDescription = description;
+    }
+    if (constraints !== undefined) {
+      const err = validateConstraints(constraints);
+      if (err) return res.status(400).json({ error: err });
+      finalConstraints = constraints;
+    }
+    await dbRun(
+      'UPDATE design_rules SET name = ?, description = ?, constraints_json = ? WHERE id = ?',
+      [finalName, finalDescription, JSON.stringify(finalConstraints), req.params.id]
+    );
+    const row = await dbGet('SELECT * FROM design_rules WHERE id = ?', [req.params.id]);
+    res.json(formatRuleRow(row));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/rules/:id', async (req, res) => {
+  try {
+    const existing = await dbGet('SELECT id FROM design_rules WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Rule template not found' });
+    await dbRun('DELETE FROM design_rules WHERE id = ?', [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/boards/:boardId/check', async (req, res) => {
+  try {
+    const { rules_id } = req.body || {};
+    if (!rules_id) return res.status(400).json({ error: 'rules_id is required' });
+    const ruleRow = await dbGet('SELECT * FROM design_rules WHERE id = ?', [rules_id]);
+    if (!ruleRow) return res.status(404).json({ error: 'Rule template not found' });
+    const board = await dbGet('SELECT id FROM boards WHERE id = ?', [req.params.boardId]);
+    if (!board) return res.status(404).json({ error: 'Board not found' });
+    const latest = await getLatestVersion(req.params.boardId);
+    if (!latest) return res.status(404).json({ error: 'No board state found' });
+    const constraints = JSON.parse(ruleRow.constraints_json);
+    const violations = runDRC(latest.state, constraints);
+    res.json({
+      rules_id,
+      rules_name: ruleRow.name,
+      violations
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/boards/:boardId/compare', async (req, res) => {
+  try {
+    const { rules_ids } = req.body || {};
+    if (!Array.isArray(rules_ids)) return res.status(400).json({ error: 'rules_ids must be an array' });
+    if (rules_ids.length < 2 || rules_ids.length > 5) {
+      return res.status(400).json({ error: 'rules_ids must contain 2-5 rule template IDs' });
+    }
+    const uniqueIds = [...new Set(rules_ids)];
+    if (uniqueIds.length !== rules_ids.length) {
+      return res.status(400).json({ error: 'rules_ids must contain unique IDs' });
+    }
+    const board = await dbGet('SELECT id FROM boards WHERE id = ?', [req.params.boardId]);
+    if (!board) return res.status(404).json({ error: 'Board not found' });
+    const latest = await getLatestVersion(req.params.boardId);
+    if (!latest) return res.status(404).json({ error: 'No board state found' });
+
+    const rules = [];
+    for (const id of rules_ids) {
+      const row = await dbGet('SELECT * FROM design_rules WHERE id = ?', [id]);
+      if (!row) return res.status(404).json({ error: `Rule template not found: ${id}` });
+      rules.push(row);
+    }
+
+    const results = [];
+    const elementViolationsMap = {};
+
+    for (const rule of rules) {
+      const constraints = JSON.parse(rule.constraints_json);
+      const violations = runDRC(latest.state, constraints);
+      const errors = violations.filter(v => v.severity === 'error').length;
+      const warnings = violations.filter(v => v.severity === 'warning').length;
+      results.push({
+        rules_id: rule.id,
+        rules_name: rule.name,
+        violation_count: violations.length,
+        errors,
+        warnings
+      });
+      for (const v of violations) {
+        if (!elementViolationsMap[v.element_id]) {
+          elementViolationsMap[v.element_id] = new Set();
+        }
+        elementViolationsMap[v.element_id].add(rule.id);
+      }
+    }
+
+    const allRuleIds = rules_ids;
+    const diff = [];
+    for (const [elementId, failingRuleIds] of Object.entries(elementViolationsMap)) {
+      const failing = [...failingRuleIds];
+      const passing = allRuleIds.filter(id => !failingRuleIds.has(id));
+      if (passing.length > 0 && failing.length > 0) {
+        diff.push({
+          element_id: elementId,
+          passes_in: passing,
+          fails_in: failing
+        });
+      }
+    }
+
+    res.json({ results, diff });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
