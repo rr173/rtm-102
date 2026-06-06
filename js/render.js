@@ -150,7 +150,7 @@ const Render = (function() {
             y: BOARD_HEIGHT / 2
         };
 
-        const newScale = Geometry.clamp(viewState.scale * factor, 0.5, 20);
+        const newScale = Geometry.clamp(viewState.scale * factor, 2.5, 100);
         const actualFactor = newScale / viewState.scale;
 
         const newScreenCenter = {

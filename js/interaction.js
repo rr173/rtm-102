@@ -189,11 +189,24 @@ const Interaction = (function() {
 
     function onWheel(e) {
         e.preventDefault();
-        const screenPos = getMousePos(e);
-        const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-        Render.zoom(factor, screenPos);
-        Render.render();
-        updateZoomDisplay();
+        if (e.ctrlKey) {
+            const screenPos = getMousePos(e);
+            const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+            Render.zoom(factor, screenPos);
+            Render.render();
+            updateZoomDisplay();
+        } else {
+            const panSpeed = 0.8;
+            let dx = 0;
+            let dy = 0;
+            if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+                dx = -e.deltaX * panSpeed;
+            } else {
+                dy = -e.deltaY * panSpeed;
+            }
+            Render.pan(dx, dy);
+            Render.render();
+        }
     }
 
     function onContextMenu(e) {
