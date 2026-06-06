@@ -5,6 +5,7 @@
         Render.init(canvas);
         Interaction.init(canvas);
         Interaction.bindToolbarEvents();
+        Interaction.initPanelResizer();
 
         PCBState.loadDemoData();
 

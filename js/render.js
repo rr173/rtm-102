@@ -25,6 +25,9 @@ const Render = (function() {
         highlight: 'rgba(243, 156, 18, 0.3)',
         ghost: 'rgba(255, 255, 255, 0.4)',
         thermal: '#e67e22',
+        ratsnest: '#f1c40f',
+        pulse: '#e94560',
+        netHighlight: '#f39c12',
         netColors: {
             'NET1': '#e74c3c',
             'NET2': '#3498db',
@@ -54,6 +57,15 @@ const Render = (function() {
         ghostPad: null,
         ghostVia: null,
         dragState: null
+    };
+
+    let reportState = {
+        panelOpen: false,
+        pulseTarget: null,
+        pulseStartTime: 0,
+        pulseCount: 0,
+        highlightedNet: null,
+        showRatsnest: false
     };
 
     function init(canvasElement) {
@@ -138,6 +150,68 @@ const Render = (function() {
         interactionState.drawingCopperPour = pour;
     }
 
+    function setPanelOpen(open) {
+        reportState.panelOpen = open;
+        if (!open) {
+            reportState.showRatsnest = false;
+        }
+    }
+
+    function setHighlightedNet(net) {
+        reportState.highlightedNet = net;
+    }
+
+    function getHighlightedNet() {
+        return reportState.highlightedNet;
+    }
+
+    function setShowRatsnest(show) {
+        reportState.showRatsnest = show;
+    }
+
+    function startPulseAnimation(position) {
+        reportState.pulseTarget = position;
+        reportState.pulseStartTime = performance.now();
+        reportState.pulseCount = 0;
+        runPulseFrame();
+    }
+
+    function runPulseFrame() {
+        if (!reportState.pulseTarget) return;
+
+        const elapsed = performance.now() - reportState.pulseStartTime;
+        const cycleDuration = 600;
+        const totalCycles = 3;
+        const totalDuration = cycleDuration * totalCycles;
+
+        if (elapsed >= totalDuration) {
+            reportState.pulseTarget = null;
+            render();
+            return;
+        }
+
+        reportState.pulseCount = Math.floor(elapsed / cycleDuration);
+        render();
+        requestAnimationFrame(runPulseFrame);
+    }
+
+    function centerOnPosition(point, targetScale) {
+        const scale = targetScale || viewState.scale;
+        const boardPixelW = BOARD_WIDTH * scale;
+        const boardPixelH = BOARD_HEIGHT * scale;
+
+        const container = canvas.parentElement;
+        const containerWidth = container.clientWidth;
+        const containerHeight = container.clientHeight;
+
+        const pointScreenX = point.x * scale;
+        const pointScreenY = point.y * scale;
+
+        viewState.scale = scale;
+        viewState.offsetX = containerWidth / 2 - pointScreenX;
+        viewState.offsetY = containerHeight / 2 - pointScreenY;
+    }
+
     function worldToScreen(point) {
         return {
             x: point.x * viewState.scale + viewState.offsetX,
@@ -209,6 +283,14 @@ const Render = (function() {
             drawDRCViolations();
         }
 
+        if (reportState.panelOpen && reportState.showRatsnest) {
+            drawRatsnestLines();
+        }
+
+        if (reportState.highlightedNet) {
+            drawNetHighlight(reportState.highlightedNet);
+        }
+
         drawGhostElements();
 
         drawDrawingTrack();
@@ -216,6 +298,10 @@ const Render = (function() {
         drawDrawingCopperPour();
 
         drawSelection();
+
+        if (reportState.pulseTarget) {
+            drawPulseAnimation();
+        }
 
         if (interactionState.hoverPoint) {
             drawCursor();
@@ -419,6 +505,113 @@ const Render = (function() {
             ctx.setLineDash([]);
             ctx.restore();
         }
+    }
+
+    function drawRatsnestLines() {
+        const connectivity = DRC.getConnectivityReport();
+        if (!connectivity || connectivity.length === 0) return;
+
+        ctx.save();
+        ctx.strokeStyle = COLORS.ratsnest;
+        ctx.lineWidth = Math.max(1, viewState.scale * 0.12);
+        ctx.setLineDash([4, 4]);
+        ctx.lineCap = 'round';
+
+        for (const netReport of connectivity) {
+            for (const missing of netReport.missing) {
+                const from = worldToScreen({ x: missing.from.x, y: missing.from.y });
+                const to = worldToScreen({ x: missing.to.x, y: missing.to.y });
+
+                ctx.beginPath();
+                ctx.moveTo(from.x, from.y);
+                ctx.lineTo(to.x, to.y);
+                ctx.stroke();
+            }
+        }
+
+        ctx.setLineDash([]);
+        ctx.restore();
+    }
+
+    function drawNetHighlight(net) {
+        const state = PCBState.getState();
+        const netColor = COLORS.netColors[net] || COLORS.netHighlight;
+
+        ctx.save();
+
+        for (const pad of state.pads) {
+            if (pad.net !== net) continue;
+            const center = worldToScreen(pad);
+            const radius = Math.max(1, (pad.diameter / 2 + 0.25) * viewState.scale);
+            ctx.strokeStyle = netColor;
+            ctx.lineWidth = Math.max(2, viewState.scale * 0.2);
+            ctx.globalAlpha = 0.9;
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+
+        for (const via of state.vias) {
+            if (via.net !== net) continue;
+            const center = worldToScreen(via);
+            const radius = Math.max(1, (via.diameter / 2 + 0.25) * viewState.scale);
+            ctx.strokeStyle = netColor;
+            ctx.lineWidth = Math.max(2, viewState.scale * 0.2);
+            ctx.globalAlpha = 0.9;
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+
+        for (const track of state.tracks) {
+            if (track.net !== net) continue;
+            if (track.points.length < 2) continue;
+            const pixelWidth = Math.max(3, (track.width + 0.5) * viewState.scale);
+            ctx.strokeStyle = netColor;
+            ctx.lineWidth = pixelWidth;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.globalAlpha = 0.35;
+            ctx.beginPath();
+            const start = worldToScreen(track.points[0]);
+            ctx.moveTo(start.x, start.y);
+            for (let i = 1; i < track.points.length; i++) {
+                const p = worldToScreen(track.points[i]);
+                ctx.lineTo(p.x, p.y);
+            }
+            ctx.stroke();
+        }
+
+        ctx.restore();
+    }
+
+    function drawPulseAnimation() {
+        if (!reportState.pulseTarget) return;
+
+        const elapsed = performance.now() - reportState.pulseStartTime;
+        const cycleDuration = 600;
+        const t = (elapsed % cycleDuration) / cycleDuration;
+
+        const pos = worldToScreen(reportState.pulseTarget);
+        const baseRadius = Math.max(8, viewState.scale * 1.0);
+        const maxRadius = baseRadius * 2.5;
+        const radius = baseRadius + (maxRadius - baseRadius) * t;
+        const alpha = 1 - t;
+
+        ctx.save();
+        ctx.globalAlpha = alpha * 0.8;
+        ctx.strokeStyle = COLORS.pulse;
+        ctx.lineWidth = Math.max(2, viewState.scale * 0.25);
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.globalAlpha = alpha * 0.3;
+        ctx.fillStyle = COLORS.pulse;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, radius * 0.7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
     }
 
     function drawGhostElements() {
@@ -865,6 +1058,12 @@ const Render = (function() {
         setDragState,
         getBoardBounds,
         centerBoard,
+        setPanelOpen,
+        setHighlightedNet,
+        getHighlightedNet,
+        setShowRatsnest,
+        startPulseAnimation,
+        centerOnPosition,
         COLORS
     };
 })();

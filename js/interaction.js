@@ -7,6 +7,11 @@ const Interaction = (function() {
     let lastClickTime = 0;
     let lastClickPos = null;
     let contextMenuTarget = null;
+    let selectedViolationId = null;
+    let selectedConnectivityNet = null;
+    let isResizingPanel = false;
+    let resizeStartX = 0;
+    let resizeStartWidth = 0;
 
     const DOUBLE_CLICK_TIME = 300;
     const DOUBLE_CLICK_DIST = 5;
@@ -777,6 +782,26 @@ const Interaction = (function() {
             }
         });
 
+        document.getElementById('btn-report').addEventListener('click', () => {
+            toggleReportPanel();
+            const btn = document.getElementById('btn-report');
+            const panel = document.getElementById('report-panel');
+            btn.classList.toggle('active', panel.classList.contains('open'));
+        });
+
+        document.getElementById('report-close').addEventListener('click', () => {
+            closeReportPanel();
+            document.getElementById('btn-report').classList.remove('active');
+        });
+
+        document.getElementById('btn-clear-highlight').addEventListener('click', () => {
+            clearAllHighlights();
+        });
+
+        document.getElementById('btn-recheck').addEventListener('click', () => {
+            recheckReport();
+        });
+
         document.getElementById('context-apply').addEventListener('click', () => {
             if (!contextMenuTarget) return;
             const net = document.getElementById('context-net').value;
@@ -813,6 +838,272 @@ const Interaction = (function() {
         });
     }
 
+    function generateReport() {
+        DRC.runCheck();
+        renderReportPanel();
+        openReportPanel();
+        Render.render();
+        updateDRCDisplay();
+    }
+
+    function openReportPanel() {
+        const panel = document.getElementById('report-panel');
+        panel.classList.add('open');
+        Render.setPanelOpen(true);
+        const connectivity = DRC.getConnectivityReport();
+        if (connectivity && connectivity.length > 0) {
+            Render.setShowRatsnest(true);
+        }
+        Render.render();
+    }
+
+    function closeReportPanel() {
+        const panel = document.getElementById('report-panel');
+        panel.classList.remove('open');
+        Render.setPanelOpen(false);
+        Render.setShowRatsnest(false);
+        Render.setHighlightedNet(null);
+        selectedViolationId = null;
+        selectedConnectivityNet = null;
+        Render.render();
+    }
+
+    function toggleReportPanel() {
+        const panel = document.getElementById('report-panel');
+        if (panel.classList.contains('open')) {
+            closeReportPanel();
+        } else {
+            generateReport();
+        }
+    }
+
+    function renderReportPanel() {
+        const violations = DRC.getViolations();
+        const connectivity = DRC.getConnectivityReport();
+
+        const errors = violations.filter(v => v.severity === 'error');
+        const warnings = violations.filter(v => v.severity === 'warning');
+
+        document.getElementById('summary-total').textContent = violations.length;
+        document.getElementById('summary-errors').textContent = errors.length;
+        document.getElementById('summary-warnings').textContent = warnings.length;
+
+        renderViolationList(violations);
+        renderConnectivityList(connectivity);
+    }
+
+    function renderViolationList(violations) {
+        const listEl = document.getElementById('violation-list');
+
+        if (violations.length === 0) {
+            listEl.innerHTML = '<div class="empty-message">暂无违规</div>';
+            return;
+        }
+
+        const sorted = [...violations].sort((a, b) => {
+            if (a.severity !== b.severity) {
+                return a.severity === 'error' ? -1 : 1;
+            }
+            return a.clearance - b.clearance;
+        });
+
+        let html = '';
+        for (const v of sorted) {
+            const layerName = v.layer === 'front' ? '正面' : '背面';
+            const selectedClass = v.id === selectedViolationId ? ' selected' : '';
+            html += `
+                <div class="violation-item ${v.severity}${selectedClass}" data-violation-id="${v.id}">
+                    <div class="violation-header">
+                        <span class="violation-severity ${v.severity}">${v.severity === 'error' ? '错误' : '警告'}</span>
+                        <span class="violation-layer">${layerName}</span>
+                    </div>
+                    <div class="violation-detail">
+                        <span class="violation-nets">${v.element1.net} ↔ ${v.element2.net}</span><br>
+                        实际间距: <span class="violation-clearance">${v.clearance.toFixed(3)}mm</span>
+                    </div>
+                </div>
+            `;
+        }
+        listEl.innerHTML = html;
+
+        listEl.querySelectorAll('.violation-item').forEach(item => {
+            item.addEventListener('click', () => {
+                const id = parseInt(item.dataset.violationId);
+                focusViolation(id);
+            });
+        });
+    }
+
+    function focusViolation(id) {
+        const violations = DRC.getViolations();
+        const violation = violations.find(v => v.id === id);
+        if (!violation) return;
+
+        selectedViolationId = id;
+        selectedConnectivityNet = null;
+        Render.setHighlightedNet(null);
+
+        const view = Render.getViewState();
+        const targetScale = Math.max(view.scale, 15);
+        Render.centerOnPosition(violation.position, targetScale);
+        Render.startPulseAnimation(violation.position);
+
+        renderReportPanel();
+        updateZoomDisplay();
+        Render.render();
+    }
+
+    function renderConnectivityList(connectivity) {
+        const listEl = document.getElementById('connectivity-list');
+
+        if (!connectivity || connectivity.length === 0) {
+            listEl.innerHTML = '<div class="empty-message">所有网络均已连通</div>';
+            return;
+        }
+
+        let html = '';
+        for (const netReport of connectivity) {
+            const selectedClass = netReport.net === selectedConnectivityNet ? ' selected' : '';
+            html += `
+                <div class="connectivity-item${selectedClass}" data-net="${netReport.net}">
+                    <div class="connectivity-header">
+                        <span class="connectivity-net">${netReport.net}</span>
+                        <span class="connectivity-counts">${netReport.nodes}节点 / ${netReport.components}组</span>
+                    </div>
+                    <div class="connectivity-missing">
+            `;
+            for (let i = 0; i < netReport.missing.length; i++) {
+                const m = netReport.missing[i];
+                html += `
+                    <div class="ratsnest-item" data-net="${netReport.net}" data-missing-index="${i}">
+                        ${m.from.type} → ${m.to.type}
+                        <span class="ratsnest-distance">${m.distance.toFixed(2)}mm</span>
+                    </div>
+                `;
+            }
+            html += `
+                    </div>
+                </div>
+            `;
+        }
+        listEl.innerHTML = html;
+
+        listEl.querySelectorAll('.connectivity-item').forEach(item => {
+            item.addEventListener('click', (e) => {
+                if (e.target.classList.contains('ratsnest-item')) return;
+                const net = item.dataset.net;
+                highlightDisconnectedNet(net);
+            });
+        });
+
+        listEl.querySelectorAll('.ratsnest-item').forEach(item => {
+            let clickTimer = null;
+            item.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const net = item.dataset.net;
+                const idx = parseInt(item.dataset.missingIndex);
+                if (clickTimer) {
+                    clearTimeout(clickTimer);
+                    clickTimer = null;
+                    focusRatsnestConnection(net, idx);
+                } else {
+                    clickTimer = setTimeout(() => {
+                        highlightDisconnectedNet(net);
+                        clickTimer = null;
+                    }, DOUBLE_CLICK_TIME);
+                }
+            });
+        });
+    }
+
+    function highlightDisconnectedNet(net) {
+        selectedConnectivityNet = net;
+        selectedViolationId = null;
+        Render.setHighlightedNet(net);
+        Render.setShowRatsnest(true);
+        renderReportPanel();
+        Render.render();
+    }
+
+    function focusRatsnestConnection(net, missingIndex) {
+        const connectivity = DRC.getConnectivityReport();
+        const netReport = connectivity.find(r => r.net === net);
+        if (!netReport || !netReport.missing[missingIndex]) return;
+
+        const missing = netReport.missing[missingIndex];
+        const midPoint = {
+            x: (missing.from.x + missing.to.x) / 2,
+            y: (missing.from.y + missing.to.y) / 2
+        };
+
+        selectedConnectivityNet = net;
+        Render.setHighlightedNet(net);
+        Render.setShowRatsnest(true);
+
+        const view = Render.getViewState();
+        const targetScale = Math.max(view.scale, 15);
+        Render.centerOnPosition(midPoint, targetScale);
+        Render.startPulseAnimation(midPoint);
+
+        renderReportPanel();
+        updateZoomDisplay();
+        Render.render();
+    }
+
+    function clearAllHighlights() {
+        selectedViolationId = null;
+        selectedConnectivityNet = null;
+        Render.setHighlightedNet(null);
+        renderReportPanel();
+        Render.render();
+    }
+
+    function recheckReport() {
+        DRC.runCheck();
+        renderReportPanel();
+        const connectivity = DRC.getConnectivityReport();
+        if (connectivity && connectivity.length > 0) {
+            Render.setShowRatsnest(true);
+        } else {
+            Render.setShowRatsnest(false);
+        }
+        Render.render();
+        updateDRCDisplay();
+    }
+
+    function initPanelResizer() {
+        const resizer = document.getElementById('report-resizer');
+        const panel = document.getElementById('report-panel');
+
+        resizer.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            isResizingPanel = true;
+            resizeStartX = e.clientX;
+            resizeStartWidth = panel.offsetWidth;
+            resizer.classList.add('active');
+            document.body.style.cursor = 'ew-resize';
+            document.body.style.userSelect = 'none';
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isResizingPanel) return;
+            const delta = resizeStartX - e.clientX;
+            let newWidth = resizeStartWidth + delta;
+            newWidth = Math.max(200, Math.min(400, newWidth));
+            panel.style.width = newWidth + 'px';
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isResizingPanel) {
+                isResizingPanel = false;
+                resizer.classList.remove('active');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                setTimeout(() => Render.render(), 50);
+            }
+        });
+    }
+
     return {
         init,
         bindToolbarEvents,
@@ -821,6 +1112,14 @@ const Interaction = (function() {
         updateZoomDisplay,
         updateDRCDisplay,
         updateLayerButtons,
-        updateToolButtons
+        updateToolButtons,
+        generateReport,
+        openReportPanel,
+        closeReportPanel,
+        toggleReportPanel,
+        renderReportPanel,
+        clearAllHighlights,
+        recheckReport,
+        initPanelResizer
     };
 })();

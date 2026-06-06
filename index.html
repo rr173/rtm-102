@@ -108,6 +108,15 @@
             <div class="toolbar-spacer"></div>
 
             <div class="toolbar-group">
+                <button class="tool-btn" id="btn-report" title="生成DRC报告">
+                    <span class="icon">📋</span>
+                    <span class="label">报告</span>
+                </button>
+            </div>
+
+            <div class="toolbar-separator"></div>
+
+            <div class="toolbar-group">
                 <button class="tool-btn" id="btn-undo" title="撤销 (Ctrl+Z)">
                     <span class="icon">↶</span>
                 </button>
@@ -120,6 +129,7 @@
             </div>
         </div>
 
+        <div class="workspace-container">
         <div class="canvas-container">
             <canvas id="pcb-canvas"></canvas>
             <div class="coordinate-display">
@@ -127,6 +137,51 @@
                 <span class="coord-separator">|</span>
                 <span id="mouse-pos">X: 0.00, Y: 0.00 mm</span>
             </div>
+        </div>
+
+        <div class="report-panel" id="report-panel">
+            <div class="report-resizer" id="report-resizer"></div>
+            <div class="report-header">
+                <span class="report-title">设计规则检查报告</span>
+                <button class="report-close" id="report-close">×</button>
+            </div>
+            <div class="report-summary" id="report-summary">
+                <div class="summary-item">
+                    <span class="summary-label">违规总数:</span>
+                    <span class="summary-value total" id="summary-total">0</span>
+                </div>
+                <div class="summary-item">
+                    <span class="summary-label">错误:</span>
+                    <span class="summary-value error" id="summary-errors">0</span>
+                </div>
+                <div class="summary-item">
+                    <span class="summary-label">警告:</span>
+                    <span class="summary-value warning" id="summary-warnings">0</span>
+                </div>
+            </div>
+            <div class="report-content" id="report-content">
+                <div class="report-section" id="violations-section">
+                    <div class="section-header">
+                        <span>间距违规</span>
+                    </div>
+                    <div class="violation-list" id="violation-list">
+                        <div class="empty-message">暂无违规</div>
+                    </div>
+                </div>
+                <div class="report-section" id="connectivity-section">
+                    <div class="section-header">
+                        <span>网络连通性</span>
+                    </div>
+                    <div class="connectivity-list" id="connectivity-list">
+                        <div class="empty-message">所有网络均已连通</div>
+                    </div>
+                </div>
+            </div>
+            <div class="report-actions">
+                <button class="report-btn" id="btn-clear-highlight">全部清除</button>
+                <button class="report-btn primary" id="btn-recheck">重新检查</button>
+            </div>
+        </div>
         </div>
 
         <div class="status-bar">

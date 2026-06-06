@@ -1,7 +1,9 @@
 const DRC = (function() {
     let violations = [];
+    let connectivityReport = [];
     let minClearance = 0.2;
     let enabled = true;
+    let nextViolationId = 1;
 
     function setClearance(value) {
         minClearance = value;
@@ -23,9 +25,22 @@ const DRC = (function() {
         return violations;
     }
 
+    function getConnectivityReport() {
+        return connectivityReport;
+    }
+
+    function getReport() {
+        return {
+            violations: violations,
+            connectivity: connectivityReport
+        };
+    }
+
     function runCheck() {
         violations = [];
-        if (!enabled) return violations;
+        connectivityReport = [];
+        nextViolationId = 1;
+        if (!enabled) return getReport();
 
         const state = PCBState.getState();
 
@@ -35,7 +50,9 @@ const DRC = (function() {
         checkLayerElements(frontElements, 'front');
         checkLayerElements(backElements, 'back');
 
-        return violations;
+        connectivityReport = checkConnectivity(state);
+
+        return getReport();
     }
 
     function collectLayerElements(state, layer) {
@@ -102,6 +119,14 @@ const DRC = (function() {
         return elements;
     }
 
+    function getElementName(el) {
+        if (el.type === 'pad') return `Pad#${el.element.id}(${el.net})`;
+        if (el.type === 'via') return `Via#${el.element.id}(${el.net})`;
+        if (el.type === 'track') return `Track#${el.element.id}(${el.net})`;
+        if (el.type === 'copperPour') return `Pour#${el.element.id}(${el.net})`;
+        return `${el.type}(${el.net})`;
+    }
+
     function checkLayerElements(elements, layer) {
         for (let i = 0; i < elements.length; i++) {
             for (let j = i + 1; j < elements.length; j++) {
@@ -119,12 +144,26 @@ const DRC = (function() {
                 const result = computeClearance(e1.shape, e2.shape);
                 const requiredClearance = computeRequiredClearance(e1, e2);
                 if (result.clearance < requiredClearance - 1e-6) {
+                    let severity = 'warning';
+                    if (result.clearance < requiredClearance * 0.5) {
+                        severity = 'error';
+                    }
                     violations.push({
+                        id: nextViolationId++,
                         layer: layer,
                         position: result.position,
                         clearance: result.clearance,
-                        element1: e1,
-                        element2: e2
+                        severity: severity,
+                        element1: {
+                            name: getElementName(e1),
+                            net: e1.net,
+                            type: e1.type
+                        },
+                        element2: {
+                            name: getElementName(e2),
+                            net: e2.net,
+                            type: e2.type
+                        }
                     });
                 }
             }
@@ -294,9 +333,254 @@ const DRC = (function() {
         return { clearance, position: mid };
     }
 
+    function checkConnectivity(state) {
+        const allNets = new Set();
+        for (const pad of state.pads) allNets.add(pad.net);
+        for (const via of state.vias) allNets.add(via.net);
+        for (const track of state.tracks) allNets.add(track.net);
+
+        const report = [];
+
+        for (const net of allNets) {
+            const pads = state.pads.filter(p => p.net === net);
+            const vias = state.vias.filter(v => v.net === net);
+            const tracks = state.tracks.filter(t => t.net === net);
+
+            const nodes = [];
+            for (const pad of pads) {
+                nodes.push({
+                    id: `pad_${pad.id}`,
+                    type: 'pad',
+                    element: pad,
+                    x: pad.x,
+                    y: pad.y,
+                    radius: pad.diameter / 2
+                });
+            }
+            for (const via of vias) {
+                nodes.push({
+                    id: `via_${via.id}`,
+                    type: 'via',
+                    element: via,
+                    x: via.x,
+                    y: via.y,
+                    radius: via.diameter / 2
+                });
+            }
+
+            if (nodes.length < 2) continue;
+
+            const adjacency = {};
+            for (const node of nodes) {
+                adjacency[node.id] = [];
+            }
+
+            for (const track of tracks) {
+                if (track.points.length < 2) continue;
+
+                const endpoints = [
+                    track.points[0],
+                    track.points[track.points.length - 1]
+                ];
+
+                const connectedNodeIds = [];
+                for (const ep of endpoints) {
+                    for (const node of nodes) {
+                        const tol = node.radius + 0.15;
+                        if (Geometry.dist(ep, node) <= tol) {
+                            if (!connectedNodeIds.includes(node.id)) {
+                                connectedNodeIds.push(node.id);
+                            }
+                        }
+                    }
+                }
+
+                const midPoints = [];
+                for (let i = 0; i < track.points.length - 1; i++) {
+                    const segStart = track.points[i];
+                    const segEnd = track.points[i + 1];
+                    for (const node of nodes) {
+                        const d = Geometry.pointToSegmentDistance(node, segStart, segEnd);
+                        const tol = node.radius + track.width / 2 + 0.05;
+                        if (d <= tol) {
+                            if (!connectedNodeIds.includes(node.id)) {
+                                connectedNodeIds.push(node.id);
+                            }
+                        }
+                    }
+                }
+
+                for (let a = 0; a < connectedNodeIds.length; a++) {
+                    for (let b = a + 1; b < connectedNodeIds.length; b++) {
+                        const idA = connectedNodeIds[a];
+                        const idB = connectedNodeIds[b];
+                        if (!adjacency[idA].includes(idB)) {
+                            adjacency[idA].push(idB);
+                        }
+                        if (!adjacency[idB].includes(idA)) {
+                            adjacency[idB].push(idA);
+                        }
+                    }
+                }
+
+                if (tracks.length > 1) {
+                    for (const otherTrack of tracks) {
+                        if (otherTrack.id === track.id) continue;
+                        if (otherTrack.layer !== track.layer) continue;
+                        if (otherTrack.points.length < 2) continue;
+
+                        for (let i = 0; i < track.points.length - 1; i++) {
+                            const s1 = track.points[i];
+                            const e1 = track.points[i + 1];
+                            for (let j = 0; j < otherTrack.points.length - 1; j++) {
+                                const s2 = otherTrack.points[j];
+                                const e2 = otherTrack.points[j + 1];
+                                const d = Geometry.segmentSegmentDistance(s1, e1, s2, e2);
+                                const tol = track.width / 2 + otherTrack.width / 2 + 0.05;
+                                if (d <= tol) {
+                                    const trackConnectedNodes = [];
+                                    const otherConnectedNodes = [];
+                                    for (const node of nodes) {
+                                        const d1 = minDistanceFromNodeToTrack(node, track);
+                                        const tol1 = node.radius + track.width / 2 + 0.1;
+                                        if (d1 <= tol1 && !trackConnectedNodes.includes(node.id)) {
+                                            trackConnectedNodes.push(node.id);
+                                        }
+                                        const d2 = minDistanceFromNodeToTrack(node, otherTrack);
+                                        const tol2 = node.radius + otherTrack.width / 2 + 0.1;
+                                        if (d2 <= tol2 && !otherConnectedNodes.includes(node.id)) {
+                                            otherConnectedNodes.push(node.id);
+                                        }
+                                    }
+                                    for (const idA of trackConnectedNodes) {
+                                        for (const idB of otherConnectedNodes) {
+                                            if (idA !== idB) {
+                                                if (!adjacency[idA].includes(idB)) {
+                                                    adjacency[idA].push(idB);
+                                                }
+                                                if (!adjacency[idB].includes(idA)) {
+                                                    adjacency[idB].push(idA);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (const nodeA of nodes) {
+                for (const nodeB of nodes) {
+                    if (nodeA.id >= nodeB.id) continue;
+                    if (nodeA.type === 'via' && nodeB.type === 'via') continue;
+                    const d = Geometry.dist(nodeA, nodeB);
+                    const tol = nodeA.radius + nodeB.radius + 0.05;
+                    if (d <= tol) {
+                        if (!adjacency[nodeA.id].includes(nodeB.id)) {
+                            adjacency[nodeA.id].push(nodeB.id);
+                        }
+                        if (!adjacency[nodeB.id].includes(nodeA.id)) {
+                            adjacency[nodeB.id].push(nodeA.id);
+                        }
+                    }
+                }
+            }
+
+            const components = findConnectedComponents(nodes, adjacency);
+
+            if (components.length > 1) {
+                const missing = findMissingConnections(components);
+                report.push({
+                    net: net,
+                    nodes: nodes.length,
+                    components: components.length,
+                    missing: missing
+                });
+            }
+        }
+
+        return report;
+    }
+
+    function minDistanceFromNodeToTrack(node, track) {
+        let minD = Infinity;
+        for (let i = 0; i < track.points.length - 1; i++) {
+            const d = Geometry.pointToSegmentDistance(node, track.points[i], track.points[i + 1]);
+            if (d < minD) minD = d;
+        }
+        return minD;
+    }
+
+    function findConnectedComponents(nodes, adjacency) {
+        const visited = {};
+        const components = [];
+
+        for (const node of nodes) {
+            if (visited[node.id]) continue;
+
+            const component = [];
+            const queue = [node.id];
+            visited[node.id] = true;
+
+            while (queue.length > 0) {
+                const currentId = queue.shift();
+                const currentNode = nodes.find(n => n.id === currentId);
+                if (currentNode) {
+                    component.push(currentNode);
+                }
+                const neighbors = adjacency[currentId] || [];
+                for (const neighborId of neighbors) {
+                    if (!visited[neighborId]) {
+                        visited[neighborId] = true;
+                        queue.push(neighborId);
+                    }
+                }
+            }
+
+            components.push(component);
+        }
+
+        return components;
+    }
+
+    function findMissingConnections(components) {
+        const missing = [];
+
+        for (let i = 0; i < components.length; i++) {
+            for (let j = i + 1; j < components.length; j++) {
+                let bestPair = null;
+                let bestDist = Infinity;
+
+                for (const nodeA of components[i]) {
+                    for (const nodeB of components[j]) {
+                        const d = Geometry.dist(nodeA, nodeB);
+                        if (d < bestDist) {
+                            bestDist = d;
+                            bestPair = {
+                                from: { id: nodeA.id, type: nodeA.type, x: nodeA.x, y: nodeA.y },
+                                to: { id: nodeB.id, type: nodeB.type, x: nodeB.x, y: nodeB.y },
+                                distance: d
+                            };
+                        }
+                    }
+                }
+
+                if (bestPair) {
+                    missing.push(bestPair);
+                }
+            }
+        }
+
+        return missing;
+    }
+
     return {
         runCheck,
         getViolations,
+        getConnectivityReport,
+        getReport,
         setClearance,
         getClearance,
         setEnabled,
