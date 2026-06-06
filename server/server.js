@@ -13,7 +13,7 @@ const wss = new WebSocket.Server({ server });
 
 const PORT = process.env.PORT || 3000;
 const MAX_VERSIONS = 50;
-const AUTO_SAVE_INTERVAL = 30000;
+const AUTO_SAVE_INTERVAL = parseInt(process.env.AUTO_SAVE_INTERVAL || '30000');
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -221,9 +221,167 @@ function describeOperation(op) {
   return typeMap[t] || t;
 }
 
+function dist(a, b) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function isTrackConnectedToPadLocal(track, padId, pads) {
+  const pad = pads.find(p => p.id === padId);
+  if (!pad) return false;
+  if (track.points.length < 2) return false;
+  const start = track.points[0];
+  const end = track.points[track.points.length - 1];
+  const tol = pad.diameter / 2 + 0.1;
+  return dist(start, pad) <= tol || dist(end, pad) <= tol;
+}
+
+function applyOperationToState(state, op) {
+  if (!op || !op.type) return state;
+  switch (op.type) {
+    case 'setState':
+      return JSON.parse(JSON.stringify(op.payload.state));
+    case 'clearAll':
+      return { pads: [], tracks: [], vias: [], copperPours: [], nextId: state.nextId || 1 };
+    case 'addPad':
+      if (op.payload.pad) state.pads.push(JSON.parse(JSON.stringify(op.payload.pad)));
+      return state;
+    case 'updatePad': {
+        const pad = state.pads.find(p => p.id === op.payload.id);
+        if (pad) Object.assign(pad, op.payload.updates);
+        return state;
+      }
+    case 'removePad': {
+        const idx = state.pads.findIndex(p => p.id === op.payload.id);
+        if (idx >= 0) state.pads.splice(idx, 1);
+        state.tracks = state.tracks.filter(t => !isTrackConnectedToPadLocal(t, op.payload.id, state.pads));
+        return state;
+      }
+    case 'movePad': {
+        const pad = state.pads.find(p => p.id === op.payload.id);
+        if (pad) {
+          const dx = op.payload.newPosition.x - pad.x;
+          const dy = op.payload.newPosition.y - pad.y;
+          pad.x = op.payload.newPosition.x;
+          pad.y = op.payload.newPosition.y;
+          for (const track of state.tracks) {
+            if (track.points.length < 1) continue;
+            const start = track.points[0];
+            const end = track.points[track.points.length - 1];
+            const tol = pad.diameter / 2 + 0.1;
+            if (dist(start, { x: pad.x - dx, y: pad.y - dy }) <= tol) {
+              start.x = pad.x;
+              start.y = pad.y;
+            }
+            if (dist(end, { x: pad.x - dx, y: pad.y - dy }) <= tol) {
+              end.x = pad.x;
+              end.y = pad.y;
+            }
+          }
+        }
+        return state;
+      }
+    case 'addTrack':
+      if (op.payload.track) state.tracks.push(JSON.parse(JSON.stringify(op.payload.track)));
+      return state;
+    case 'updateTrack': {
+        const track = state.tracks.find(t => t.id === op.payload.id);
+        if (track) {
+          Object.assign(track, op.payload.updates);
+          if (op.payload.updates && op.payload.updates.points) {
+            track.points = op.payload.updates.points.map(p => ({ x: p.x, y: p.y }));
+          }
+        }
+        return state;
+      }
+    case 'removeTrack': {
+        const idx = state.tracks.findIndex(t => t.id === op.payload.id);
+        if (idx >= 0) state.tracks.splice(idx, 1);
+        return state;
+      }
+    case 'addVia':
+      if (op.payload.via) state.vias.push(JSON.parse(JSON.stringify(op.payload.via)));
+      return state;
+    case 'updateVia': {
+        const via = state.vias.find(v => v.id === op.payload.id);
+        if (via) Object.assign(via, op.payload.updates);
+        return state;
+      }
+    case 'removeVia': {
+        const idx = state.vias.findIndex(v => v.id === op.payload.id);
+        if (idx >= 0) state.vias.splice(idx, 1);
+        return state;
+      }
+    case 'moveVia': {
+        const via = state.vias.find(v => v.id === op.payload.id);
+        if (via) {
+          const dx = op.payload.newPosition.x - via.x;
+          const dy = op.payload.newPosition.y - via.y;
+          via.x = op.payload.newPosition.x;
+          via.y = op.payload.newPosition.y;
+          for (const track of state.tracks) {
+            if (track.points.length < 1) continue;
+            const start = track.points[0];
+            const end = track.points[track.points.length - 1];
+            const tol = via.diameter / 2 + 0.1;
+            if (dist(start, { x: via.x - dx, y: via.y - dy }) <= tol) {
+              start.x = via.x;
+              start.y = via.y;
+            }
+            if (dist(end, { x: via.x - dx, y: via.y - dy }) <= tol) {
+              end.x = via.x;
+              end.y = via.y;
+            }
+          }
+        }
+        return state;
+      }
+    case 'addCopperPour':
+      if (op.payload.pour) state.copperPours.push(JSON.parse(JSON.stringify(op.payload.pour)));
+      return state;
+    case 'updateCopperPour': {
+        const pour = state.copperPours.find(p => p.id === op.payload.id);
+        if (pour) {
+          Object.assign(pour, op.payload.updates);
+          if (op.payload.updates && op.payload.updates.points) {
+            pour.points = op.payload.updates.points.map(p => ({ x: p.x, y: p.y }));
+          }
+        }
+        return state;
+      }
+    case 'removeCopperPour': {
+        const idx = state.copperPours.findIndex(p => p.id === op.payload.id);
+        if (idx >= 0) state.copperPours.splice(idx, 1);
+        return state;
+      }
+    case 'setCopperPourVertex': {
+        const pour = state.copperPours.find(p => p.id === op.payload.id);
+        if (pour && op.payload.vertexIndex >= 0 && op.payload.vertexIndex < pour.points.length) {
+          pour.points[op.payload.vertexIndex] = { x: op.payload.newPosition.x, y: op.payload.newPosition.y };
+        }
+        return state;
+      }
+  }
+  return state;
+}
+
+async function ensureBoardState(boardId) {
+  if (boardLatestState[boardId]) return boardLatestState[boardId];
+  const latest = await getLatestVersion(boardId);
+  if (latest) {
+    boardLatestState[boardId] = latest;
+    return latest;
+  }
+  return null;
+}
+
 function accumulateOp(boardId, op) {
   if (!boardPendingOps[boardId]) boardPendingOps[boardId] = [];
   boardPendingOps[boardId].push(op);
+  if (boardLatestState[boardId]) {
+    boardLatestState[boardId].state = applyOperationToState(boardLatestState[boardId].state, op);
+  }
   scheduleAutoSave(boardId);
 }
 
@@ -388,11 +546,12 @@ wss.on('connection', async (ws, req) => {
     console.error(e);
   }
 
-  ws.on('message', (data) => {
+  ws.on('message', async (data) => {
     let msg;
     try { msg = JSON.parse(data.toString()); } catch { return; }
 
     if (msg.type === 'operation') {
+      await ensureBoardState(boardId);
       accumulateOp(boardId, msg.payload);
       broadcast(boardId, { type: 'operation', payload: msg.payload, from: 'server' }, ws);
     }

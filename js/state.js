@@ -45,14 +45,16 @@ const PCBState = (function() {
     function undo() {
         if (undoStack.length === 0) return false;
         redoStack.push(JSON.parse(JSON.stringify(state)));
-        state = undoStack.pop();
+        state = JSON.parse(JSON.stringify(undoStack.pop()));
+        emitOperation('setState', { state: JSON.parse(JSON.stringify(state)) });
         return true;
     }
 
     function redo() {
         if (redoStack.length === 0) return false;
         undoStack.push(JSON.parse(JSON.stringify(state)));
-        state = redoStack.pop();
+        state = JSON.parse(JSON.stringify(redoStack.pop()));
+        emitOperation('setState', { state: JSON.parse(JSON.stringify(state)) });
         return true;
     }
 
@@ -517,7 +519,7 @@ const PCBState = (function() {
         try {
             switch (op.type) {
                 case 'setState':
-                    setState(op.payload.state, { noEmit: true });
+                    setState(op.payload.state, { silent: true, noEmit: true });
                     break;
                 case 'clearAll':
                     state.pads = [];
