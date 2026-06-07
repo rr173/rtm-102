@@ -8,6 +8,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const { mountBomRoutes } = require('./bom');
 const { mountSimulationRoutes } = require('./simulation');
+const { createAuditModule, extractAffectedElementsFromOp, computeStateDiff } = require('./audit');
 
 const app = express();
 const server = http.createServer(app);
@@ -50,6 +51,12 @@ function dbAll(sql, params = []) {
       else resolve(rows);
     });
   });
+}
+
+const audit = createAuditModule(db, { dbRun, dbGet, dbAll });
+
+function getOperator(req) {
+  return (req && req.headers && req.headers['x-operator']) || 'anonymous';
 }
 
 (async function bootstrap() {
@@ -100,10 +107,12 @@ function dbAll(sql, params = []) {
       FOREIGN KEY (batch_id) REFERENCES import_batches(batch_id) ON DELETE CASCADE
     )
   `);
+  await audit.initTable();
   await initDemoBoard();
   await initDemoRules();
   await recoverImportTasks();
   startImportQueue();
+  audit.mountAuditRoutes(app);
   mountBomRoutes(app, { getLatestVersion });
   mountSimulationRoutes(app, { getLatestVersion });
   server.listen(PORT, () => {
@@ -118,6 +127,7 @@ const boardClients = {};
 const boardPendingOps = {};
 const boardAutoSaveTimers = {};
 const boardLatestState = {};
+const boardLastOperator = {};
 
 function getDemoState() {
   let nextId = 1;
@@ -225,18 +235,35 @@ async function saveVersion(boardId, state, summary) {
   return newVersion;
 }
 
+async function getLastPersistedState(boardId) {
+  const row = await dbGet(
+    'SELECT state_json FROM board_versions WHERE board_id = ? ORDER BY version DESC LIMIT 1',
+    [boardId]
+  );
+  return row ? JSON.parse(row.state_json) : null;
+}
+
 function scheduleAutoSave(boardId) {
   if (boardAutoSaveTimers[boardId]) return;
   boardAutoSaveTimers[boardId] = setTimeout(async () => {
     delete boardAutoSaveTimers[boardId];
     const ops = boardPendingOps[boardId];
     if (ops && ops.length > 0) {
-      const latest = await getLatestVersion(boardId);
+      const beforeState = await getLastPersistedState(boardId);
+      const latest = boardLatestState[boardId];
       if (latest) {
         const summary = ops.length > 1
           ? `${ops.length} operations`
           : describeOperation(ops[0]);
-        await saveVersion(boardId, latest.state, summary);
+        const afterState = latest.state;
+        await saveVersion(boardId, afterState, summary);
+        audit.recordAuditLog({
+          board_id: boardId,
+          action_type: 'save',
+          operator: boardLastOperator[boardId] || 'anonymous',
+          before_state: beforeState,
+          after_state: afterState
+        });
       }
     }
     boardPendingOps[boardId] = [];
@@ -485,7 +512,16 @@ app.put('/api/boards/:id', async (req, res) => {
     const state = req.body?.state;
     if (!state) return res.status(400).json({ error: 'state is required' });
     const summary = req.body?.summary || 'Manual save';
+    const latest = await getLatestVersion(req.params.id);
+    const beforeState = latest ? latest.state : null;
     const version = await saveVersion(req.params.id, state, summary);
+    audit.recordAuditLog({
+      board_id: req.params.id,
+      action_type: 'save',
+      operator: getOperator(req),
+      before_state: beforeState,
+      after_state: state
+    });
     res.json({ version });
   } catch (e) {
     console.error(e);
@@ -538,7 +574,16 @@ app.post('/api/boards/:id/revert/:ver', async (req, res) => {
     );
     if (!target) return res.status(404).json({ error: 'Version not found' });
     const state = JSON.parse(target.state_json);
+    const latest = await getLatestVersion(req.params.id);
+    const beforeState = latest ? latest.state : null;
     const newVersion = await saveVersion(req.params.id, state, `Revert to version ${ver}`);
+    audit.recordAuditLog({
+      board_id: req.params.id,
+      action_type: 'revert',
+      operator: getOperator(req),
+      before_state: beforeState,
+      after_state: state
+    });
     broadcast(req.params.id, { type: 'revert', payload: { version: newVersion, state } });
     res.json({ version: newVersion });
   } catch (e) {
@@ -550,6 +595,9 @@ app.post('/api/boards/:id/revert/:ver', async (req, res) => {
 wss.on('connection', async (ws, req) => {
   const url = new URL(req.url, 'http://localhost');
   const boardId = url.searchParams.get('board_id');
+  const wsOperator = url.searchParams.get('operator')
+    || (req.headers && req.headers['x-operator'])
+    || 'anonymous';
 
   if (!boardId) {
     ws.close(4000, 'board_id required');
@@ -570,6 +618,7 @@ wss.on('connection', async (ws, req) => {
   if (!boardClients[boardId]) boardClients[boardId] = [];
   boardClients[boardId].push(ws);
   ws.boardId = boardId;
+  ws.operator = wsOperator;
 
   try {
     const latest = await getLatestVersion(boardId);
@@ -588,7 +637,30 @@ wss.on('connection', async (ws, req) => {
 
     if (msg.type === 'operation') {
       await ensureBoardState(boardId);
-      accumulateOp(boardId, msg.payload);
+      const op = msg.payload;
+      const beforeState = boardLatestState[boardId]
+        ? JSON.parse(JSON.stringify(boardLatestState[boardId].state))
+        : null;
+      accumulateOp(boardId, op);
+      const afterState = boardLatestState[boardId]
+        ? boardLatestState[boardId].state
+        : null;
+
+      let affected = extractAffectedElementsFromOp(op);
+      if (affected.length === 0 && beforeState && afterState) {
+        affected = computeStateDiff(beforeState, afterState);
+      }
+
+      audit.recordAuditLog({
+        board_id: boardId,
+        action_type: 'operation',
+        operator: ws.operator,
+        before_state: beforeState,
+        after_state: afterState,
+        affected_elements: affected
+      });
+
+      boardLastOperator[boardId] = ws.operator;
       broadcast(boardId, { type: 'operation', payload: msg.payload, from: 'server' }, ws);
     }
   });
@@ -606,13 +678,22 @@ wss.on('connection', async (ws, req) => {
         }
         if (boardPendingOps[boardId] && boardPendingOps[boardId].length > 0) {
           try {
-            const latest = await getLatestVersion(boardId);
+            const beforeState = await getLastPersistedState(boardId);
+            const latest = boardLatestState[boardId];
             if (latest) {
               const ops = boardPendingOps[boardId];
               const summary = ops.length > 1
                 ? `${ops.length} operations`
                 : describeOperation(ops[0]);
-              await saveVersion(boardId, latest.state, summary);
+              const afterState = latest.state;
+              await saveVersion(boardId, afterState, summary);
+              audit.recordAuditLog({
+                board_id: boardId,
+                action_type: 'save',
+                operator: boardLastOperator[boardId] || 'anonymous',
+                before_state: beforeState,
+                after_state: afterState
+              });
             }
           } catch (e) {
             console.error('Auto-save on close failed:', e);
@@ -620,6 +701,7 @@ wss.on('connection', async (ws, req) => {
         }
         delete boardPendingOps[boardId];
         delete boardLatestState[boardId];
+        delete boardLastOperator[boardId];
       }
     }
     broadcastOnlineCount(boardId);
@@ -1359,6 +1441,13 @@ async function processTask(task) {
       [boardId, 1, JSON.stringify(state), 'Imported from KiCad', now]
     );
     boardLatestState[boardId] = { version: 1, state };
+    audit.recordAuditLog({
+      board_id: boardId,
+      action_type: 'import',
+      operator: 'anonymous',
+      before_state: null,
+      after_state: state
+    });
     await updateTaskStatus(task.task_id, 'completed', { board_id: boardId });
   } catch (e) {
     console.error(`Task ${task.task_id} failed:`, e.message);
