@@ -12,6 +12,7 @@ const { createAuditModule, extractAffectedElementsFromOp, computeStateDiff } = r
 const { createLocksModule } = require('./locks');
 const { createTemplatesModule } = require('./templates');
 const { createDiffModule } = require('./diff');
+const { evaluateBoard, rankBoards } = require('./health');
 
 const app = express();
 const server = http.createServer(app);
@@ -1178,6 +1179,85 @@ app.post('/api/boards/:boardId/check', async (req, res) => {
       rules_id,
       rules_name: ruleRow.name,
       violations
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/boards/:boardId/health', async (req, res) => {
+  try {
+    const boardId = req.params.boardId;
+    const weights = req.body?.weights || null;
+
+    const board = await dbGet('SELECT id, name, created_at FROM boards WHERE id = ?', [boardId]);
+    if (!board) return res.status(404).json({ error: 'Board not found' });
+
+    const latest = await getLatestVersion(boardId);
+    if (!latest) return res.status(404).json({ error: 'No board state found' });
+
+    const evaluation = evaluateBoard(latest.state, weights);
+    res.json({
+      board_id: board.id,
+      board_name: board.name,
+      version: latest.version,
+      created_at: board.created_at,
+      ...evaluation
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/health/compare', async (req, res) => {
+  try {
+    const { board_ids, weights } = req.body || {};
+    if (!Array.isArray(board_ids)) {
+      return res.status(400).json({ error: 'board_ids must be an array' });
+    }
+    if (board_ids.length < 1) {
+      return res.status(400).json({ error: 'board_ids must contain at least 1 board ID' });
+    }
+    if (board_ids.length > 20) {
+      return res.status(400).json({ error: 'board_ids must contain no more than 20 board IDs' });
+    }
+
+    const uniqueIds = [...new Set(board_ids)];
+    const results = [];
+
+    for (const id of uniqueIds) {
+      const board = await dbGet('SELECT id, name, created_at FROM boards WHERE id = ?', [id]);
+      if (!board) {
+        results.push({ board_id: id, error: 'Board not found' });
+        continue;
+      }
+      const latest = await getLatestVersion(id);
+      if (!latest) {
+        results.push({ board_id: id, board_name: board.name, error: 'No board state found' });
+        continue;
+      }
+      const evaluation = evaluateBoard(latest.state, weights);
+      results.push({
+        board_id: board.id,
+        board_name: board.name,
+        version: latest.version,
+        created_at: board.created_at,
+        ...evaluation
+      });
+    }
+
+    const validResults = results.filter(r => !r.error);
+    const ranked = rankBoards(validResults);
+    const errorResults = results.filter(r => r.error);
+
+    res.json({
+      total: results.length,
+      ranked_count: ranked.length,
+      error_count: errorResults.length,
+      ranking: ranked,
+      errors: errorResults.length > 0 ? errorResults : undefined
     });
   } catch (e) {
     console.error(e);
