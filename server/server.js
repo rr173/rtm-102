@@ -9,6 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const { mountBomRoutes } = require('./bom');
 const { mountSimulationRoutes } = require('./simulation');
 const { createAuditModule, extractAffectedElementsFromOp, computeStateDiff } = require('./audit');
+const { createLocksModule } = require('./locks');
 
 const app = express();
 const server = http.createServer(app);
@@ -54,6 +55,7 @@ function dbAll(sql, params = []) {
 }
 
 const audit = createAuditModule(db, { dbRun, dbGet, dbAll });
+const locks = createLocksModule(db, { dbRun, dbGet, dbAll, computeStateDiff });
 
 function getOperator(req) {
   return (req && req.headers && req.headers['x-operator']) || 'anonymous';
@@ -108,6 +110,8 @@ function getOperator(req) {
     )
   `);
   await audit.initTable();
+  await locks.initTable();
+  locks.mountLockRoutes(app, getOperator);
   await initDemoBoard();
   await initDemoRules();
   await recoverImportTasks();
@@ -514,11 +518,24 @@ app.put('/api/boards/:id', async (req, res) => {
     const summary = req.body?.summary || 'Manual save';
     const latest = await getLatestVersion(req.params.id);
     const beforeState = latest ? latest.state : null;
+    const operator = getOperator(req);
+
+    const lockCheck = await locks.checkStateSaveAllowed(
+      req.params.id, beforeState, state, operator
+    );
+    if (!lockCheck.allowed) {
+      return res.status(403).json({
+        error: lockCheck.error,
+        locked_by: lockCheck.locked_by,
+        element_id: lockCheck.element_id
+      });
+    }
+
     const version = await saveVersion(req.params.id, state, summary);
     audit.recordAuditLog({
       board_id: req.params.id,
       action_type: 'save',
-      operator: getOperator(req),
+      operator: operator,
       before_state: beforeState,
       after_state: state
     });
@@ -641,6 +658,27 @@ wss.on('connection', async (ws, req) => {
       const beforeState = boardLatestState[boardId]
         ? JSON.parse(JSON.stringify(boardLatestState[boardId].state))
         : null;
+
+      let tempAfterState = null;
+      if (beforeState && (op.type === 'setState' || op.type === 'clearAll')) {
+        tempAfterState = applyOperationToState(JSON.parse(JSON.stringify(beforeState)), op);
+      }
+
+      const lockCheck = await locks.checkOperationAllowed(
+        boardId, op, ws.operator, beforeState, tempAfterState
+      );
+      if (!lockCheck.allowed) {
+        ws.send(JSON.stringify({
+          type: 'reject',
+          payload: {
+            error: lockCheck.error,
+            locked_by: lockCheck.locked_by,
+            element_id: lockCheck.element_id
+          }
+        }));
+        return;
+      }
+
       accumulateOp(boardId, op);
       const afterState = boardLatestState[boardId]
         ? boardLatestState[boardId].state
