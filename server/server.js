@@ -11,6 +11,7 @@ const { mountSimulationRoutes } = require('./simulation');
 const { createAuditModule, extractAffectedElementsFromOp, computeStateDiff } = require('./audit');
 const { createLocksModule } = require('./locks');
 const { createTemplatesModule } = require('./templates');
+const { createDiffModule } = require('./diff');
 
 const app = express();
 const server = http.createServer(app);
@@ -64,6 +65,7 @@ function dbAll(sql, params = []) {
 const audit = createAuditModule(db, { dbRun, dbGet, dbAll });
 const locks = createLocksModule(db, { dbRun, dbGet, dbAll, computeStateDiff });
 const templates = createTemplatesModule(db, { dbRun, dbGet, dbAll, boardLatestState });
+const diff = createDiffModule(db, { dbGet, dbAll, getLatestVersion, saveVersion, audit, getOperator, broadcast });
 
 function getOperator(req) {
   return (req && req.headers && req.headers['x-operator']) || 'anonymous';
@@ -127,6 +129,7 @@ function getOperator(req) {
   await recoverImportTasks();
   startImportQueue();
   audit.mountAuditRoutes(app);
+  diff.mountDiffRoutes(app);
   mountBomRoutes(app, { getLatestVersion });
   mountSimulationRoutes(app, { getLatestVersion });
   server.listen(PORT, () => {
