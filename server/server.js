@@ -10,6 +10,7 @@ const { mountBomRoutes } = require('./bom');
 const { mountSimulationRoutes } = require('./simulation');
 const { createAuditModule, extractAffectedElementsFromOp, computeStateDiff } = require('./audit');
 const { createLocksModule } = require('./locks');
+const { createTemplatesModule } = require('./templates');
 
 const app = express();
 const server = http.createServer(app);
@@ -21,6 +22,12 @@ const AUTO_SAVE_INTERVAL = parseInt(process.env.AUTO_SAVE_INTERVAL || '30000');
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+const boardClients = {};
+const boardPendingOps = {};
+const boardAutoSaveTimers = {};
+const boardLatestState = {};
+const boardLastOperator = {};
 
 const dataDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
@@ -56,6 +63,7 @@ function dbAll(sql, params = []) {
 
 const audit = createAuditModule(db, { dbRun, dbGet, dbAll });
 const locks = createLocksModule(db, { dbRun, dbGet, dbAll, computeStateDiff });
+const templates = createTemplatesModule(db, { dbRun, dbGet, dbAll, boardLatestState });
 
 function getOperator(req) {
   return (req && req.headers && req.headers['x-operator']) || 'anonymous';
@@ -111,7 +119,9 @@ function getOperator(req) {
   `);
   await audit.initTable();
   await locks.initTable();
+  await templates.initTable();
   locks.mountLockRoutes(app, getOperator);
+  templates.mountTemplatesRoutes(app);
   await initDemoBoard();
   await initDemoRules();
   await recoverImportTasks();
@@ -126,12 +136,6 @@ function getOperator(req) {
   console.error('Bootstrap failed:', err);
   process.exit(1);
 });
-
-const boardClients = {};
-const boardPendingOps = {};
-const boardAutoSaveTimers = {};
-const boardLatestState = {};
-const boardLastOperator = {};
 
 function getDemoState() {
   let nextId = 1;
