@@ -13,6 +13,10 @@ const { createLocksModule } = require('./locks');
 const { createTemplatesModule } = require('./templates');
 const { createDiffModule } = require('./diff');
 const { evaluateBoard, rankBoards } = require('./health');
+const {
+  analyzeBoard,
+  applyColinearOptimization
+} = require('./routeOptimize');
 
 const app = express();
 const server = http.createServer(app);
@@ -291,7 +295,8 @@ function describeOperation(op) {
     addVia: 'Add via', removeVia: 'Remove via', updateVia: 'Update via', moveVia: 'Move via',
     addCopperPour: 'Add copper pour', removeCopperPour: 'Remove copper pour',
     updateCopperPour: 'Update copper pour', setCopperPourVertex: 'Edit copper pour',
-    clearAll: 'Clear board', setState: 'Update state'
+    clearAll: 'Clear board', setState: 'Update state',
+    route_optimize: 'Route optimization'
   };
   return typeMap[t] || t;
 }
@@ -1749,6 +1754,81 @@ app.post('/api/import/tasks/:taskId/retry', async (req, res) => {
     await updateTaskStatus(task.task_id, 'queued', { error: null, board_id: null });
     enqueueTask(task.task_id);
     res.json({ ok: true, task_id: task.task_id, status: 'queued' });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/boards/:boardId/route-optimize/analyze', async (req, res) => {
+  try {
+    const boardId = req.params.boardId;
+    const board = await dbGet('SELECT id, name FROM boards WHERE id = ?', [boardId]);
+    if (!board) return res.status(404).json({ error: 'Board not found' });
+    const latest = await getLatestVersion(boardId);
+    if (!latest) return res.status(404).json({ error: 'No board state found' });
+    const analysis = analyzeBoard(latest.state);
+    res.json({
+      board_id: boardId,
+      board_name: board.name,
+      version: latest.version,
+      ...analysis
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/boards/:boardId/route-optimize/apply', async (req, res) => {
+  try {
+    const boardId = req.params.boardId;
+    const { track_ids } = req.body || {};
+    const board = await dbGet('SELECT id FROM boards WHERE id = ?', [boardId]);
+    if (!board) return res.status(404).json({ error: 'Board not found' });
+    const latest = await getLatestVersion(boardId);
+    if (!latest) return res.status(404).json({ error: 'No board state found' });
+    const beforeState = latest.state;
+    const operator = getOperator(req);
+    const { newState, optimizedCount, totalRemovedPoints, totalSavedLength, optimizedTrackIds } = applyColinearOptimization(beforeState, track_ids || 'all');
+    if (optimizedCount === 0) {
+      return res.json({
+        board_id: boardId,
+        version: latest.version,
+        optimized_count: 0,
+        total_removed_points: 0,
+        total_saved_length: 0,
+        optimized_track_ids: []
+      });
+    }
+    const lockCheck = await locks.checkStateSaveAllowed(
+      boardId, beforeState, newState, operator
+    );
+    if (!lockCheck.allowed) {
+      return res.status(403).json({
+        error: lockCheck.error,
+        locked_by: lockCheck.locked_by,
+        element_id: lockCheck.element_id
+      });
+    }
+    const summary = `Route optimization: simplified ${optimizedCount} track(s), removed ${totalRemovedPoints} redundant point(s), saved ${totalSavedLength.toFixed(4)} length`;
+    const newVersion = await saveVersion(boardId, newState, summary);
+    audit.recordAuditLog({
+      board_id: boardId,
+      action_type: 'route_optimize',
+      operator: operator,
+      before_state: beforeState,
+      after_state: newState
+    });
+    broadcast(boardId, { type: 'setState', payload: { state: newState } });
+    res.json({
+      board_id: boardId,
+      version: newVersion,
+      optimized_count: optimizedCount,
+      total_removed_points: totalRemovedPoints,
+      total_saved_length: totalSavedLength,
+      optimized_track_ids: optimizedTrackIds
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
