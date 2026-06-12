@@ -156,6 +156,13 @@
             <div class="toolbar-separator"></div>
 
             <div class="toolbar-group">
+                <button class="tool-btn" id="btn-script-toggle" title="脚本引擎面板">
+                    <span class="icon">⚡</span>
+                    <span class="label">脚本</span>
+                </button>
+            </div>
+
+            <div class="toolbar-group">
                 <button class="tool-btn" id="btn-undo" title="撤销 (Ctrl+Z)">
                     <span class="icon">↶</span>
                 </button>
@@ -169,6 +176,39 @@
         </div>
 
         <div class="workspace-container">
+        <div class="script-panel" id="script-panel">
+            <div class="script-resizer" id="script-resizer"></div>
+            <div class="script-header">
+                <span class="script-title">脚本引擎</span>
+                <button class="script-close" id="script-close">×</button>
+            </div>
+            <div class="script-toolbar">
+                <button class="script-btn primary" id="btn-script-preview" title="运行预览 (Ctrl+Enter)">
+                    <span class="script-btn-icon">▶</span> 运行预览
+                </button>
+                <button class="script-btn success" id="btn-script-apply" title="应用到板面">
+                    <span class="script-btn-icon">✓</span> 应用
+                </button>
+                <button class="script-btn" id="btn-script-save" title="保存脚本">
+                    <span class="script-btn-icon">💾</span> 保存
+                </button>
+                <button class="script-btn" id="btn-script-load" title="加载脚本">
+                    <span class="script-btn-icon">📂</span> 加载
+                </button>
+            </div>
+            <div class="script-editor-container" id="script-editor-container">
+                <div class="line-numbers" id="script-line-numbers"></div>
+                <textarea class="script-editor" id="script-editor" spellcheck="false" placeholder="输入脚本指令...&#10;&#10;支持的指令:&#10;LET name=value&#10;PLACE_PAD(x,y,diameter,hole,net)&#10;TRACE(net,layer,width,x1,y1,...xn,yn)&#10;VIA(x,y)&#10;REPEAT(count,dx,dy){...}&#10;COPPER(net,layer,x1,y1,...xn,yn)"></textarea>
+            </div>
+            <div class="script-console" id="script-console">
+                <div class="console-header">
+                    <span>输出控制台</span>
+                    <button class="console-clear" id="console-clear">清除</button>
+                </div>
+                <div class="console-output" id="console-output"></div>
+            </div>
+        </div>
+
         <div class="canvas-container">
             <canvas id="pcb-canvas"></canvas>
             <div class="coordinate-display">
@@ -263,6 +303,34 @@
         </div>
     </div>
 
+    <div class="script-dialog-overlay" id="script-save-dialog" style="display:none;">
+        <div class="script-dialog">
+            <div class="script-dialog-title">保存脚本</div>
+            <div class="script-dialog-body">
+                <label class="script-dialog-label">脚本名称:</label>
+                <input type="text" id="script-save-name" class="script-dialog-input" placeholder="输入脚本名称" maxlength="100">
+            </div>
+            <div class="script-dialog-actions">
+                <button class="script-btn" id="script-save-cancel">取消</button>
+                <button class="script-btn primary" id="script-save-confirm">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="script-dialog-overlay" id="script-load-dialog" style="display:none;">
+        <div class="script-dialog script-dialog-wide">
+            <div class="script-dialog-title">加载脚本</div>
+            <div class="script-dialog-body">
+                <div class="script-list" id="script-list">
+                    <div class="empty-message">加载中...</div>
+                </div>
+            </div>
+            <div class="script-dialog-actions">
+                <button class="script-btn" id="script-load-cancel">取消</button>
+            </div>
+        </div>
+    </div>
+
     <div class="context-menu" id="context-menu">
         <div class="context-menu-title" id="context-menu-title">属性设置</div>
         <div class="context-menu-item">
@@ -303,6 +371,7 @@
     <script src="js/render.js"></script>
     <script src="js/interaction.js"></script>
     <script src="js/gerber.js"></script>
+    <script src="js/scriptEngine.js"></script>
     <script src="js/main.js"></script>
 </body>
 </html>

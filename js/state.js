@@ -415,6 +415,62 @@ const PCBState = (function() {
         return state.vias.filter(v => v.net === net);
     }
 
+    function batchApply(elements) {
+        saveSnapshot();
+        for (const pad of elements.pads || []) {
+            const newPad = {
+                id: genId(),
+                type: 'pad',
+                net: pad.net || 'NET1',
+                x: pad.x,
+                y: pad.y,
+                diameter: pad.diameter || 1.6,
+                hole: pad.hole || 0.8,
+                layers: ['front', 'back']
+            };
+            state.pads.push(newPad);
+            emitOperation('addPad', { pad: JSON.parse(JSON.stringify(newPad)) });
+        }
+        for (const track of elements.tracks || []) {
+            const newTrack = {
+                id: genId(),
+                type: 'track',
+                net: track.net || 'NET1',
+                layer: track.layer || 'front',
+                width: track.width || 0.25,
+                points: track.points.map(p => ({ x: p.x, y: p.y }))
+            };
+            state.tracks.push(newTrack);
+            emitOperation('addTrack', { track: JSON.parse(JSON.stringify(newTrack)) });
+        }
+        for (const via of elements.vias || []) {
+            const newVia = {
+                id: genId(),
+                type: 'via',
+                net: via.net || 'NET1',
+                x: via.x,
+                y: via.y,
+                diameter: via.diameter || 0.6,
+                hole: via.hole || 0.3,
+                layers: ['front', 'back']
+            };
+            state.vias.push(newVia);
+            emitOperation('addVia', { via: JSON.parse(JSON.stringify(newVia)) });
+        }
+        for (const pour of elements.copperPours || []) {
+            const newPour = {
+                id: genId(),
+                type: 'copperPour',
+                net: pour.net || 'NET1',
+                layer: pour.layer || 'front',
+                points: pour.points.map(p => ({ x: p.x, y: p.y })),
+                clearance: pour.clearance !== undefined ? pour.clearance : 0.3
+            };
+            state.copperPours.push(newPour);
+            emitOperation('addCopperPour', { pour: JSON.parse(JSON.stringify(newPour)) });
+        }
+    }
+
     function loadDemoData() {
         saveSnapshot();
         state.pads = [
@@ -697,6 +753,7 @@ const PCBState = (function() {
         saveSnapshot,
         loadDemoData,
         onOperation,
-        applyOperation
+        applyOperation,
+        batchApply
     };
 })();
