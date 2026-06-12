@@ -1,11 +1,12 @@
 (function() {
     let previewingVersion = null;
     let scriptPanelOpen = false;
-    let currentBoardId = null;
     let errorLines = [];
-    let isResizingScriptPanel = false;
-    let resizeScriptStartX = 0;
-    let resizeScriptStartWidth = 0;
+    let currentEditorLine = 0;
+    let isResizingScript = false;
+    let scriptResizeStartX = 0;
+    let scriptResizeStartWidth = 0;
+    let consoleCollapsed = false;
 
     async function init() {
         const canvas = document.getElementById('pcb-canvas');
@@ -26,7 +27,6 @@
             return;
         }
 
-        currentBoardId = boardId;
         setConnStatus('连接中...', 'warning');
 
         Collaboration.on('connected', (data) => {
@@ -81,342 +81,6 @@
         bindCollabUI();
     }
 
-    function initScriptPanel() {
-        const editor = document.getElementById('script-editor');
-        const lineNumbers = document.getElementById('script-line-numbers');
-
-        updateLineNumbers();
-
-        editor.addEventListener('input', () => {
-            updateLineNumbers();
-            clearErrorHighlights();
-        });
-
-        editor.addEventListener('scroll', () => {
-            lineNumbers.scrollTop = editor.scrollTop;
-        });
-
-        editor.addEventListener('keydown', (e) => {
-            if (e.key === 'Tab') {
-                e.preventDefault();
-                const start = editor.selectionStart;
-                const end = editor.selectionEnd;
-                editor.value = editor.value.substring(0, start) + '    ' + editor.value.substring(end);
-                editor.selectionStart = editor.selectionEnd = start + 4;
-                updateLineNumbers();
-            }
-            if (e.ctrlKey && e.key === 'Enter') {
-                e.preventDefault();
-                runScriptPreview();
-            }
-        });
-
-        document.getElementById('btn-script-toggle').addEventListener('click', toggleScriptPanel);
-        document.getElementById('script-close').addEventListener('click', () => closeScriptPanel());
-
-        document.getElementById('btn-script-preview').addEventListener('click', runScriptPreview);
-        document.getElementById('btn-script-apply').addEventListener('click', applyScript);
-        document.getElementById('btn-script-save').addEventListener('click', openSaveDialog);
-        document.getElementById('btn-script-load').addEventListener('click', openLoadDialog);
-
-        document.getElementById('console-clear').addEventListener('click', () => {
-            document.getElementById('console-output').innerHTML = '';
-        });
-
-        document.getElementById('script-save-cancel').addEventListener('click', closeSaveDialog);
-        document.getElementById('script-save-confirm').addEventListener('click', confirmSaveScript);
-        document.getElementById('script-load-cancel').addEventListener('click', closeLoadDialog);
-
-        initScriptPanelResizer();
-    }
-
-    function toggleScriptPanel() {
-        if (scriptPanelOpen) {
-            closeScriptPanel();
-        } else {
-            openScriptPanel();
-        }
-    }
-
-    function openScriptPanel() {
-        document.getElementById('script-panel').classList.add('open');
-        document.getElementById('btn-script-toggle').classList.add('active');
-        scriptPanelOpen = true;
-        setTimeout(() => Render.render(), 50);
-    }
-
-    function closeScriptPanel() {
-        document.getElementById('script-panel').classList.remove('open');
-        document.getElementById('btn-script-toggle').classList.remove('active');
-        scriptPanelOpen = false;
-        ScriptEngine.clearPreview();
-        Render.setScriptPreviewElements(null);
-        Render.render();
-    }
-
-    function updateLineNumbers() {
-        const editor = document.getElementById('script-editor');
-        const lineNumbers = document.getElementById('script-line-numbers');
-        const lines = editor.value.split('\n');
-        let html = '';
-        for (let i = 1; i <= lines.length; i++) {
-            const isError = errorLines.includes(i);
-            html += '<span class="line-num' + (isError ? ' error-line' : '') + '">' + i + '</span>';
-        }
-        lineNumbers.innerHTML = html;
-    }
-
-    function clearErrorHighlights() {
-        errorLines = [];
-        updateLineNumbers();
-    }
-
-    function setErrorLines(lines) {
-        errorLines = lines;
-        updateLineNumbers();
-    }
-
-    function appendConsole(message, type) {
-        const output = document.getElementById('console-output');
-        const entry = document.createElement('div');
-        entry.className = 'log-entry ' + (type || '');
-        entry.textContent = message;
-        output.appendChild(entry);
-        output.scrollTop = output.scrollHeight;
-    }
-
-    function clearConsole() {
-        document.getElementById('console-output').innerHTML = '';
-    }
-
-    function runScriptPreview() {
-        const editor = document.getElementById('script-editor');
-        const scriptText = editor.value.trim();
-        if (!scriptText) {
-            clearConsole();
-            appendConsole('没有脚本内容', 'warning');
-            return;
-        }
-
-        clearConsole();
-        clearErrorHighlights();
-        ScriptEngine.clearPreview();
-        Render.setScriptPreviewElements(null);
-
-        appendConsole('--- 开始执行脚本 ---', 'info');
-
-        const result = ScriptEngine.runPreview(scriptText);
-
-        for (const log of result.logs) {
-            appendConsole('[行' + log.line + '] ' + log.message, '');
-        }
-
-        if (result.errors.length > 0) {
-            const errLineNums = [];
-            for (const err of result.errors) {
-                appendConsole('[行' + err.line + '] 错误: ' + err.message, 'error');
-                if (err.line > 0) errLineNums.push(err.line);
-            }
-            setErrorLines(errLineNums);
-            appendConsole('--- 执行失败,共 ' + result.errors.length + ' 个错误 ---', 'error');
-            Render.setScriptPreviewElements(null);
-        } else {
-            const totalElements = result.pads.length + result.tracks.length + result.vias.length + result.copperPours.length;
-            Render.setScriptPreviewElements(ScriptEngine.getPreviewElements());
-            appendConsole('--- 预览成功: ' +
-                result.pads.length + ' 焊盘, ' +
-                result.tracks.length + ' 走线, ' +
-                result.vias.length + ' 过孔, ' +
-                result.copperPours.length + ' 铜区 (共 ' + totalElements + ' 元素) ---', 'success');
-        }
-
-        Render.render();
-    }
-
-    function applyScript() {
-        const previewEls = ScriptEngine.getPreviewElements();
-        if (!previewEls) {
-            appendConsole('请先运行预览再应用', 'warning');
-            return;
-        }
-
-        const count = ScriptEngine.applyToState();
-        Render.setScriptPreviewElements(null);
-
-        appendConsole('--- 已应用到板面: ' + count + ' 个元素 (可通过撤销回退) ---', 'success');
-
-        DRC.runCheck();
-        Render.render();
-        Interaction.updateDRCDisplay();
-        Interaction.updateZoomDisplay();
-    }
-
-    function openSaveDialog() {
-        document.getElementById('script-save-name').value = '';
-        document.getElementById('script-save-dialog').style.display = 'flex';
-        setTimeout(() => document.getElementById('script-save-name').focus(), 50);
-    }
-
-    function closeSaveDialog() {
-        document.getElementById('script-save-dialog').style.display = 'none';
-    }
-
-    async function confirmSaveScript() {
-        const name = document.getElementById('script-save-name').value.trim();
-        if (!name) {
-            alert('请输入脚本名称');
-            return;
-        }
-
-        const editor = document.getElementById('script-editor');
-        const content = editor.value;
-
-        if (!currentBoardId) {
-            localStorage.setItem('script_local_' + name, content);
-            appendConsole('脚本已本地保存: ' + name, 'info');
-            closeSaveDialog();
-            return;
-        }
-
-        try {
-            const resp = await fetch('/api/boards/' + currentBoardId + '/scripts', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: name, content: content })
-            });
-            if (!resp.ok) {
-                const err = await resp.json();
-                throw new Error(err.error || '保存失败');
-            }
-            appendConsole('脚本已保存: ' + name, 'success');
-            closeSaveDialog();
-        } catch (e) {
-            appendConsole('保存失败: ' + e.message, 'error');
-        }
-    }
-
-    async function openLoadDialog() {
-        document.getElementById('script-load-dialog').style.display = 'flex';
-        const listEl = document.getElementById('script-list');
-
-        if (!currentBoardId) {
-            listEl.innerHTML = '<div class="empty-message">未连接到服务器,无法加载</div>';
-            return;
-        }
-
-        listEl.innerHTML = '<div class="empty-message">加载中...</div>';
-
-        try {
-            const resp = await fetch('/api/boards/' + currentBoardId + '/scripts');
-            if (!resp.ok) throw new Error('加载失败');
-            const scripts = await resp.json();
-
-            if (scripts.length === 0) {
-                listEl.innerHTML = '<div class="empty-message">暂无已保存的脚本</div>';
-                return;
-            }
-
-            let html = '';
-            for (const s of scripts) {
-                const date = new Date(s.created_at);
-                const timeStr = date.toLocaleString('zh-CN');
-                html += '<div class="script-list-item" data-script-id="' + s.id + '">' +
-                    '<div class="script-list-item-info">' +
-                    '<div class="script-list-item-name">' + escapeHtml(s.name) + '</div>' +
-                    '<div class="script-list-item-time">' + timeStr + '</div>' +
-                    '</div>' +
-                    '<button class="script-list-item-delete" data-delete-id="' + s.id + '" title="删除">×</button>' +
-                    '</div>';
-            }
-            listEl.innerHTML = html;
-
-            listEl.querySelectorAll('.script-list-item').forEach(item => {
-                item.addEventListener('click', async (e) => {
-                    if (e.target.classList.contains('script-list-item-delete')) return;
-                    const id = item.dataset.scriptId;
-                    await loadScriptById(id);
-                });
-            });
-
-            listEl.querySelectorAll('.script-list-item-delete').forEach(btn => {
-                btn.addEventListener('click', async (e) => {
-                    e.stopPropagation();
-                    const id = btn.dataset.deleteId;
-                    await deleteScriptById(id);
-                });
-            });
-        } catch (e) {
-            listEl.innerHTML = '<div class="empty-message">加载失败: ' + escapeHtml(e.message) + '</div>';
-        }
-    }
-
-    async function loadScriptById(id) {
-        try {
-            const resp = await fetch('/api/boards/' + currentBoardId + '/scripts/' + id);
-            if (!resp.ok) throw new Error('加载失败');
-            const data = await resp.json();
-            document.getElementById('script-editor').value = data.content;
-            updateLineNumbers();
-            clearErrorHighlights();
-            appendConsole('已加载脚本: ' + data.name, 'info');
-            closeLoadDialog();
-        } catch (e) {
-            appendConsole('加载失败: ' + e.message, 'error');
-        }
-    }
-
-    async function deleteScriptById(id) {
-        if (!confirm('确定要删除这个脚本吗?')) return;
-        try {
-            const resp = await fetch('/api/boards/' + currentBoardId + '/scripts/' + id, {
-                method: 'DELETE'
-            });
-            if (!resp.ok) throw new Error('删除失败');
-            appendConsole('脚本已删除', 'info');
-            openLoadDialog();
-        } catch (e) {
-            appendConsole('删除失败: ' + e.message, 'error');
-        }
-    }
-
-    function closeLoadDialog() {
-        document.getElementById('script-load-dialog').style.display = 'none';
-    }
-
-    function initScriptPanelResizer() {
-        const resizer = document.getElementById('script-resizer');
-        const panel = document.getElementById('script-panel');
-
-        resizer.addEventListener('mousedown', (e) => {
-            e.preventDefault();
-            isResizingScriptPanel = true;
-            resizeScriptStartX = e.clientX;
-            resizeScriptStartWidth = panel.offsetWidth;
-            resizer.classList.add('active');
-            document.body.style.cursor = 'ew-resize';
-            document.body.style.userSelect = 'none';
-        });
-
-        document.addEventListener('mousemove', (e) => {
-            if (!isResizingScriptPanel) return;
-            const delta = e.clientX - resizeScriptStartX;
-            let newWidth = resizeScriptStartWidth + delta;
-            newWidth = Math.max(250, Math.min(500, newWidth));
-            panel.style.width = newWidth + 'px';
-        });
-
-        document.addEventListener('mouseup', () => {
-            if (isResizingScriptPanel) {
-                isResizingScriptPanel = false;
-                const resizer = document.getElementById('script-resizer');
-                resizer.classList.remove('active');
-                document.body.style.cursor = '';
-                document.body.style.userSelect = '';
-                setTimeout(() => Render.render(), 50);
-            }
-        });
-    }
-
     function setConnStatus(text, cls) {
         const el = document.getElementById('conn-status');
         el.textContent = text;
@@ -454,6 +118,454 @@
         if (panel && panel.classList.contains('open')) {
             Interaction.renderReportPanel();
         }
+    }
+
+    function initScriptPanel() {
+        const editor = document.getElementById('script-editor');
+        const panel = document.getElementById('script-panel');
+
+        editor.value = ScriptEngine.getExampleScript();
+        updateLineNumbers();
+
+        document.getElementById('btn-script').addEventListener('click', () => {
+            toggleScriptPanel();
+        });
+
+        document.getElementById('script-close').addEventListener('click', () => {
+            closeScriptPanel();
+        });
+
+        document.getElementById('script-run-preview').addEventListener('click', () => {
+            runScriptPreview();
+        });
+
+        document.getElementById('script-apply').addEventListener('click', () => {
+            applyScript();
+        });
+
+        document.getElementById('script-save').addEventListener('click', () => {
+            saveScript();
+        });
+
+        document.getElementById('script-load').addEventListener('click', () => {
+            showLoadDialog();
+        });
+
+        document.getElementById('script-console-toggle').addEventListener('click', () => {
+            toggleConsole();
+        });
+
+        document.getElementById('script-load-close').addEventListener('click', () => {
+            hideLoadDialog();
+        });
+
+        document.addEventListener('click', (e) => {
+            const dialog = document.getElementById('script-load-dialog');
+            if (dialog.classList.contains('show') && !dialog.contains(e.target) && e.target.id !== 'script-load') {
+                hideLoadDialog();
+            }
+        });
+
+        editor.addEventListener('input', () => {
+            updateLineNumbers();
+            clearErrorHighlights();
+        });
+
+        editor.addEventListener('scroll', () => {
+            syncLineNumbers();
+        });
+
+        editor.addEventListener('keydown', (e) => {
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                const start = editor.selectionStart;
+                const end = editor.selectionEnd;
+                editor.value = editor.value.substring(0, start) + '  ' + editor.value.substring(end);
+                editor.selectionStart = editor.selectionEnd = start + 2;
+                updateLineNumbers();
+            }
+        });
+
+        editor.addEventListener('click', () => {
+            updateCurrentLine();
+        });
+
+        editor.addEventListener('keyup', () => {
+            updateCurrentLine();
+        });
+
+        initScriptPanelResizer();
+    }
+
+    function toggleScriptPanel() {
+        const panel = document.getElementById('script-panel');
+        const btn = document.getElementById('btn-script');
+        if (scriptPanelOpen) {
+            closeScriptPanel();
+        } else {
+            panel.classList.add('open');
+            btn.classList.add('active');
+            scriptPanelOpen = true;
+            setTimeout(() => Render.render(), 50);
+        }
+    }
+
+    function closeScriptPanel() {
+        const panel = document.getElementById('script-panel');
+        const btn = document.getElementById('btn-script');
+        panel.classList.remove('open');
+        btn.classList.remove('active');
+        scriptPanelOpen = false;
+        ScriptEngine.clearPreview();
+        errorLines = [];
+        Render.render();
+    }
+
+    function updateLineNumbers() {
+        const editor = document.getElementById('script-editor');
+        const lineNumEl = document.getElementById('script-line-numbers');
+        const lines = editor.value.split('\n');
+        let html = '';
+        for (let i = 1; i <= lines.length; i++) {
+            const isError = errorLines.includes(i);
+            const isCurrent = i === currentEditorLine;
+            let cls = 'line-num';
+            if (isError) cls += ' error-line';
+            if (isCurrent) cls += ' current-line';
+            html += `<span class="${cls}">${i}</span>`;
+        }
+        lineNumEl.innerHTML = html;
+        syncLineNumbers();
+    }
+
+    function syncLineNumbers() {
+        const editor = document.getElementById('script-editor');
+        const lineNumEl = document.getElementById('script-line-numbers');
+        lineNumEl.scrollTop = editor.scrollTop;
+    }
+
+    function updateCurrentLine() {
+        const editor = document.getElementById('script-editor');
+        const pos = editor.selectionStart;
+        const textBefore = editor.value.substring(0, pos);
+        const newLine = textBefore.split('\n').length;
+        if (newLine !== currentEditorLine) {
+            currentEditorLine = newLine;
+            updateLineNumbers();
+        }
+    }
+
+    function clearErrorHighlights() {
+        errorLines = [];
+        updateLineNumbers();
+    }
+
+    function runScriptPreview() {
+        const editor = document.getElementById('script-editor');
+        const scriptText = editor.value;
+
+        clearConsole();
+        appendConsole('info', '开始执行脚本...');
+
+        const result = ScriptEngine.runPreview(scriptText);
+
+        if (result.success) {
+            const el = result.elements;
+            const total = el.pads.length + el.tracks.length + el.vias.length + el.copperPours.length;
+            appendConsole('success', `脚本解析成功! 共生成 ${total} 个元素:`);
+            if (el.pads.length > 0) appendConsole('info', `  焊盘: ${el.pads.length}`);
+            if (el.tracks.length > 0) appendConsole('info', `  走线: ${el.tracks.length}`);
+            if (el.vias.length > 0) appendConsole('info', `  过孔: ${el.vias.length}`);
+            if (el.copperPours.length > 0) appendConsole('info', `  铜区: ${el.copperPours.length}`);
+            appendConsole('info', '预览叠加层已显示在画布上，点击"应用"写入板面');
+            errorLines = [];
+        } else {
+            appendConsole('error', `脚本执行失败，共 ${result.errors.length} 个错误:`);
+            for (const err of result.errors) {
+                appendConsole('error', `  行 ${err.line}: ${err.message}`);
+            }
+            errorLines = result.errorLines;
+        }
+
+        updateLineNumbers();
+        Render.render();
+    }
+
+    function applyScript() {
+        const elements = ScriptEngine.getPreviewElements();
+        if (!elements) {
+            appendConsole('warn', '没有预览数据。请先点击"预览"运行脚本。');
+            return;
+        }
+
+        const count = ScriptEngine.applyToBoard();
+        appendConsole('success', `已应用 ${count} 个元素到板面!`);
+
+        errorLines = [];
+        updateLineNumbers();
+        afterChangeRefresh();
+    }
+
+    function saveScript() {
+        const editor = document.getElementById('script-editor');
+        const name = prompt('请输入脚本名称:');
+        if (!name || !name.trim()) return;
+
+        const boardId = Collaboration.getBoardId();
+        if (!boardId) {
+            appendConsole('warn', '未连接到板面，脚本仅保存到本地');
+            saveScriptLocal(name.trim(), editor.value);
+            return;
+        }
+
+        saveScriptRemote(boardId, name.trim(), editor.value);
+    }
+
+    function saveScriptLocal(name, content) {
+        let scripts = {};
+        try {
+            scripts = JSON.parse(localStorage.getItem('pcb_scripts') || '{}');
+        } catch (e) {
+            scripts = {};
+        }
+        scripts[name] = { content: content, savedAt: Date.now() };
+        localStorage.setItem('pcb_scripts', JSON.stringify(scripts));
+        appendConsole('success', `脚本 "${name}" 已保存到本地`);
+    }
+
+    async function saveScriptRemote(boardId, name, content) {
+        try {
+            const res = await fetch(`/api/boards/${boardId}/scripts`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, content })
+            });
+            if (res.ok) {
+                appendConsole('success', `脚本 "${name}" 已保存到服务器`);
+            } else {
+                const data = await res.json();
+                appendConsole('error', `保存失败: ${data.error || res.statusText}`);
+                saveScriptLocal(name, content);
+            }
+        } catch (e) {
+            appendConsole('warn', `服务器不可达，脚本已保存到本地`);
+            saveScriptLocal(name, content);
+        }
+    }
+
+    function showLoadDialog() {
+        const dialog = document.getElementById('script-load-dialog');
+        dialog.classList.add('show');
+        loadScriptList();
+    }
+
+    function hideLoadDialog() {
+        const dialog = document.getElementById('script-load-dialog');
+        dialog.classList.remove('show');
+    }
+
+    async function loadScriptList() {
+        const listEl = document.getElementById('script-load-list');
+        const boardId = Collaboration.getBoardId();
+
+        let remoteScripts = [];
+        if (boardId) {
+            try {
+                const res = await fetch(`/api/boards/${boardId}/scripts`);
+                if (res.ok) {
+                    remoteScripts = await res.json();
+                }
+            } catch (e) {
+                // ignore
+            }
+        }
+
+        let localScripts = [];
+        try {
+            const stored = JSON.parse(localStorage.getItem('pcb_scripts') || '{}');
+            for (const [name, data] of Object.entries(stored)) {
+                localScripts.push({
+                    name: name,
+                    savedAt: data.savedAt,
+                    content: data.content,
+                    source: 'local'
+                });
+            }
+        } catch (e) {
+            // ignore
+        }
+
+        const allScripts = [
+            ...remoteScripts.map(s => ({ ...s, source: 'remote' })),
+            ...localScripts
+        ];
+
+        if (allScripts.length === 0) {
+            listEl.innerHTML = '<div class="empty-message">暂无已保存的脚本</div>';
+            return;
+        }
+
+        let html = '';
+        for (const s of allScripts) {
+            const date = new Date(s.savedAt || s.created_at);
+            const timeStr = date.toLocaleString('zh-CN');
+            const sourceTag = s.source === 'remote' ? ' [服务器]' : ' [本地]';
+            const id = s.id || '';
+            html += `
+                <div class="script-load-item" data-source="${s.source}" data-id="${id}" data-name="${escapeHtml(s.name)}">
+                    <div class="script-load-item-info">
+                        <span class="script-load-item-name">${escapeHtml(s.name)}${sourceTag}</span>
+                        <span class="script-load-item-time">${timeStr}</span>
+                    </div>
+                    <button class="script-load-item-delete" data-source="${s.source}" data-id="${id}" data-name="${escapeHtml(s.name)}">删除</button>
+                </div>
+            `;
+        }
+        listEl.innerHTML = html;
+
+        listEl.querySelectorAll('.script-load-item').forEach(item => {
+            item.addEventListener('click', (e) => {
+                if (e.target.classList.contains('script-load-item-delete')) return;
+                loadScript(item);
+            });
+        });
+
+        listEl.querySelectorAll('.script-load-item-delete').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                deleteScript(btn.dataset.source, btn.dataset.id, btn.dataset.name);
+            });
+        });
+    }
+
+    async function loadScript(item) {
+        const source = item.dataset.source;
+        const id = item.dataset.id;
+        const name = item.dataset.name;
+        let content = '';
+
+        if (source === 'remote' && id) {
+            try {
+                const boardId = Collaboration.getBoardId();
+                const res = await fetch(`/api/boards/${boardId}/scripts/${id}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    content = data.content;
+                } else {
+                    appendConsole('error', '加载远程脚本失败');
+                    return;
+                }
+            } catch (e) {
+                appendConsole('error', '加载远程脚本失败: ' + e.message);
+                return;
+            }
+        } else {
+            try {
+                const stored = JSON.parse(localStorage.getItem('pcb_scripts') || '{}');
+                if (stored[name]) {
+                    content = stored[name].content;
+                }
+            } catch (e) {
+                appendConsole('error', '加载本地脚本失败');
+                return;
+            }
+        }
+
+        if (content) {
+            const editor = document.getElementById('script-editor');
+            editor.value = content;
+            updateLineNumbers();
+            appendConsole('success', `已加载脚本: ${name}`);
+        }
+
+        hideLoadDialog();
+    }
+
+    async function deleteScript(source, id, name) {
+        if (!confirm(`确定要删除脚本 "${name}" 吗?`)) return;
+
+        if (source === 'remote' && id) {
+            try {
+                const boardId = Collaboration.getBoardId();
+                await fetch(`/api/boards/${boardId}/scripts/${id}`, { method: 'DELETE' });
+                appendConsole('info', `已删除远程脚本: ${name}`);
+            } catch (e) {
+                appendConsole('error', '删除远程脚本失败: ' + e.message);
+                return;
+            }
+        } else {
+            try {
+                const stored = JSON.parse(localStorage.getItem('pcb_scripts') || '{}');
+                delete stored[name];
+                localStorage.setItem('pcb_scripts', JSON.stringify(stored));
+                appendConsole('info', `已删除本地脚本: ${name}`);
+            } catch (e) {
+                // ignore
+            }
+        }
+
+        loadScriptList();
+    }
+
+    function toggleConsole() {
+        const console_ = document.getElementById('script-console');
+        const icon = document.querySelector('.console-toggle-icon');
+        consoleCollapsed = !consoleCollapsed;
+        if (consoleCollapsed) {
+            console_.classList.add('collapsed');
+            icon.textContent = '▸';
+        } else {
+            console_.classList.remove('collapsed');
+            icon.textContent = '▾';
+        }
+    }
+
+    function clearConsole() {
+        document.getElementById('console-content').innerHTML = '';
+    }
+
+    function appendConsole(type, message) {
+        const content = document.getElementById('console-content');
+        const line = document.createElement('div');
+        line.className = 'console-line ' + type;
+        const prefix = type === 'error' ? '✗ ' : type === 'success' ? '✓ ' : type === 'warn' ? '⚠ ' : '› ';
+        line.textContent = prefix + message;
+        content.appendChild(line);
+        content.scrollTop = content.scrollHeight;
+    }
+
+    function initScriptPanelResizer() {
+        const resizer = document.getElementById('script-resizer');
+        const panel = document.getElementById('script-panel');
+
+        resizer.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            isResizingScript = true;
+            scriptResizeStartX = e.clientX;
+            scriptResizeStartWidth = panel.offsetWidth;
+            resizer.classList.add('active');
+            document.body.style.cursor = 'ew-resize';
+            document.body.style.userSelect = 'none';
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isResizingScript) return;
+            const delta = e.clientX - scriptResizeStartX;
+            let newWidth = scriptResizeStartWidth + delta;
+            newWidth = Math.max(250, Math.min(500, newWidth));
+            panel.style.width = newWidth + 'px';
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isResizingScript) {
+                isResizingScript = false;
+                const resizer = document.getElementById('script-resizer');
+                resizer.classList.remove('active');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                setTimeout(() => Render.render(), 50);
+            }
+        });
     }
 
     function bindCollabUI() {

@@ -35,9 +35,12 @@ const Render = (function() {
             'NET4': '#9b59b6',
             'NET5': '#f39c12'
         },
-        scriptPreview: 'rgba(46, 204, 113, 0.45)',
-        scriptPreviewBorder: 'rgba(46, 204, 113, 0.8)',
-        scriptPreviewFill: 'rgba(46, 204, 113, 0.2)'
+        previewOverlay: 'rgba(46, 204, 113, 0.45)',
+        previewBorder: 'rgba(46, 204, 113, 0.9)',
+        previewPad: 'rgba(46, 204, 113, 0.55)',
+        previewTrack: 'rgba(46, 204, 113, 0.5)',
+        previewVia: 'rgba(46, 204, 113, 0.6)',
+        previewPour: 'rgba(46, 204, 113, 0.25)'
     };
 
     let canvas, ctx;
@@ -60,10 +63,6 @@ const Render = (function() {
         ghostPad: null,
         ghostVia: null,
         dragState: null
-    };
-
-    let scriptPreviewState = {
-        elements: null
     };
 
     let reportState = {
@@ -174,10 +173,6 @@ const Render = (function() {
 
     function setShowRatsnest(show) {
         reportState.showRatsnest = show;
-    }
-
-    function setScriptPreviewElements(elements) {
-        scriptPreviewState.elements = elements;
     }
 
     function startPulseAnimation(position) {
@@ -308,8 +303,6 @@ const Render = (function() {
 
         drawDrawingCopperPour();
 
-        drawScriptPreview();
-
         drawSelection();
 
         if (reportState.pulseTarget) {
@@ -319,6 +312,8 @@ const Render = (function() {
         if (interactionState.hoverPoint) {
             drawCursor();
         }
+
+        drawScriptPreview();
     }
 
     function drawBoard() {
@@ -813,91 +808,6 @@ const Render = (function() {
         ctx.restore();
     }
 
-    function drawScriptPreview() {
-        if (!scriptPreviewState.elements) return;
-        const els = scriptPreviewState.elements;
-
-        ctx.save();
-
-        if (els.copperPours && els.copperPours.length > 0) {
-            for (const pour of els.copperPours) {
-                if (pour.points.length < 3) continue;
-                ctx.fillStyle = COLORS.scriptPreviewFill;
-                ctx.beginPath();
-                buildPolygonPath(pour.points);
-                ctx.fill();
-                ctx.strokeStyle = COLORS.scriptPreviewBorder;
-                ctx.lineWidth = Math.max(1, viewState.scale * 0.1);
-                ctx.beginPath();
-                buildPolygonPath(pour.points);
-                ctx.stroke();
-            }
-        }
-
-        if (els.tracks && els.tracks.length > 0) {
-            for (const track of els.tracks) {
-                if (track.points.length < 2) continue;
-                const pixelWidth = Math.max(1, track.width * viewState.scale);
-                ctx.strokeStyle = COLORS.scriptPreview;
-                ctx.lineWidth = pixelWidth;
-                ctx.lineCap = 'round';
-                ctx.lineJoin = 'round';
-                ctx.beginPath();
-                const start = worldToScreen(track.points[0]);
-                ctx.moveTo(start.x, start.y);
-                for (let i = 1; i < track.points.length; i++) {
-                    const p = worldToScreen(track.points[i]);
-                    ctx.lineTo(p.x, p.y);
-                }
-                ctx.stroke();
-            }
-        }
-
-        if (els.pads && els.pads.length > 0) {
-            for (const pad of els.pads) {
-                const center = worldToScreen(pad);
-                const radius = Math.max(1, pad.diameter / 2 * viewState.scale);
-                const holeRadius = Math.max(0.5, pad.hole / 2 * viewState.scale);
-                ctx.beginPath();
-                ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
-                ctx.fillStyle = COLORS.scriptPreview;
-                ctx.fill();
-                ctx.beginPath();
-                ctx.arc(center.x, center.y, holeRadius, 0, Math.PI * 2);
-                ctx.fillStyle = COLORS.padHole;
-                ctx.fill();
-                ctx.strokeStyle = COLORS.scriptPreviewBorder;
-                ctx.lineWidth = Math.max(1, viewState.scale * 0.08);
-                ctx.beginPath();
-                ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
-                ctx.stroke();
-            }
-        }
-
-        if (els.vias && els.vias.length > 0) {
-            for (const via of els.vias) {
-                const center = worldToScreen(via);
-                const radius = Math.max(1, via.diameter / 2 * viewState.scale);
-                const holeRadius = Math.max(0.5, via.hole / 2 * viewState.scale);
-                ctx.beginPath();
-                ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
-                ctx.fillStyle = COLORS.scriptPreview;
-                ctx.fill();
-                ctx.beginPath();
-                ctx.arc(center.x, center.y, holeRadius, 0, Math.PI * 2);
-                ctx.fillStyle = COLORS.viaCenter;
-                ctx.fill();
-                ctx.strokeStyle = COLORS.scriptPreviewBorder;
-                ctx.lineWidth = Math.max(1, viewState.scale * 0.08);
-                ctx.beginPath();
-                ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
-                ctx.stroke();
-            }
-        }
-
-        ctx.restore();
-    }
-
     function buildPolygonPath(points) {
         if (!points || points.length < 3) return;
         const first = worldToScreen(points[0]);
@@ -1133,6 +1043,99 @@ const Render = (function() {
         ctx.restore();
     }
 
+    function drawScriptPreview() {
+        if (typeof ScriptEngine === 'undefined') return;
+        const elements = ScriptEngine.getPreviewElements();
+        if (!elements) return;
+
+        ctx.save();
+
+        for (const pad of elements.pads) {
+            const center = worldToScreen(pad);
+            const radius = Math.max(1, pad.diameter / 2 * viewState.scale);
+            const holeRadius = Math.max(0.5, pad.hole / 2 * viewState.scale);
+
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+            ctx.fillStyle = COLORS.previewPad;
+            ctx.fill();
+            ctx.strokeStyle = COLORS.previewBorder;
+            ctx.lineWidth = Math.max(1, viewState.scale * 0.08);
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, holeRadius, 0, Math.PI * 2);
+            ctx.fillStyle = COLORS.padHole;
+            ctx.fill();
+        }
+
+        for (const track of elements.tracks) {
+            if (track.points.length < 2) continue;
+            const pixelWidth = Math.max(1, track.width * viewState.scale);
+
+            ctx.strokeStyle = COLORS.previewTrack;
+            ctx.lineWidth = pixelWidth;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            ctx.beginPath();
+            const start = worldToScreen(track.points[0]);
+            ctx.moveTo(start.x, start.y);
+            for (let i = 1; i < track.points.length; i++) {
+                const p = worldToScreen(track.points[i]);
+                ctx.lineTo(p.x, p.y);
+            }
+            ctx.stroke();
+
+            ctx.strokeStyle = COLORS.previewBorder;
+            ctx.lineWidth = Math.max(1, viewState.scale * 0.05);
+            ctx.beginPath();
+            const s2 = worldToScreen(track.points[0]);
+            ctx.moveTo(s2.x, s2.y);
+            for (let i = 1; i < track.points.length; i++) {
+                const p2 = worldToScreen(track.points[i]);
+                ctx.lineTo(p2.x, p2.y);
+            }
+            ctx.stroke();
+        }
+
+        for (const via of elements.vias) {
+            const center = worldToScreen(via);
+            const radius = Math.max(1, via.diameter / 2 * viewState.scale);
+            const holeRadius = Math.max(0.5, via.hole / 2 * viewState.scale);
+
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+            ctx.fillStyle = COLORS.previewVia;
+            ctx.fill();
+            ctx.strokeStyle = COLORS.previewBorder;
+            ctx.lineWidth = Math.max(1, viewState.scale * 0.08);
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, holeRadius, 0, Math.PI * 2);
+            ctx.fillStyle = COLORS.viaCenter;
+            ctx.fill();
+        }
+
+        for (const pour of elements.copperPours) {
+            if (pour.points.length < 3) continue;
+
+            ctx.fillStyle = COLORS.previewPour;
+            ctx.beginPath();
+            buildPolygonPath(pour.points);
+            ctx.fill();
+
+            ctx.strokeStyle = COLORS.previewBorder;
+            ctx.lineWidth = Math.max(1, viewState.scale * 0.06);
+            ctx.beginPath();
+            buildPolygonPath(pour.points);
+            ctx.stroke();
+        }
+
+        ctx.restore();
+    }
+
     return {
         init,
         render,
@@ -1162,7 +1165,6 @@ const Render = (function() {
         setShowRatsnest,
         startPulseAnimation,
         centerOnPosition,
-        setScriptPreviewElements,
         COLORS
     };
 })();

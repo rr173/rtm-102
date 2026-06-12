@@ -131,6 +131,7 @@ function getOperator(req) {
       name TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
       FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE
     )
   `);
@@ -147,6 +148,69 @@ function getOperator(req) {
   diff.mountDiffRoutes(app);
   mountBomRoutes(app, { getLatestVersion });
   mountSimulationRoutes(app, { getLatestVersion });
+
+  app.post('/api/boards/:boardId/scripts', async (req, res) => {
+    try {
+      const { name, content } = req.body || {};
+      if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
+      if (!content || typeof content !== 'string') return res.status(400).json({ error: 'content is required' });
+      const board = await dbGet('SELECT id FROM boards WHERE id = ?', [req.params.boardId]);
+      if (!board) return res.status(404).json({ error: 'Board not found' });
+      const id = uuidv4().replace(/-/g, '').substring(0, 12);
+      const now = Date.now();
+      await dbRun(
+        'INSERT INTO board_scripts (id, board_id, name, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [id, req.params.boardId, name, content, now, now]
+      );
+      res.status(201).json({ id, name, created_at: now, updated_at: now });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/boards/:boardId/scripts', async (req, res) => {
+    try {
+      const rows = await dbAll(
+        'SELECT id, name, created_at, updated_at FROM board_scripts WHERE board_id = ? ORDER BY updated_at DESC',
+        [req.params.boardId]
+      );
+      res.json(rows);
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/boards/:boardId/scripts/:scriptId', async (req, res) => {
+    try {
+      const row = await dbGet(
+        'SELECT id, name, content, created_at, updated_at FROM board_scripts WHERE id = ? AND board_id = ?',
+        [req.params.scriptId, req.params.boardId]
+      );
+      if (!row) return res.status(404).json({ error: 'Script not found' });
+      res.json(row);
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/boards/:boardId/scripts/:scriptId', async (req, res) => {
+    try {
+      const existing = await dbGet(
+        'SELECT id FROM board_scripts WHERE id = ? AND board_id = ?',
+        [req.params.scriptId, req.params.boardId]
+      );
+      if (!existing) return res.status(404).json({ error: 'Script not found' });
+      await dbRun('DELETE FROM board_scripts WHERE id = ?', [req.params.scriptId]);
+      res.json({ ok: true });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   server.listen(PORT, () => {
     console.log(`PCB Editor server listening on port ${PORT}`);
   });
@@ -1092,72 +1156,6 @@ function runDRC(state, constraints) {
   }
   return allViolations;
 }
-
-app.post('/api/boards/:boardId/scripts', async (req, res) => {
-  try {
-    const { name, content } = req.body || {};
-    if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
-    if (!content || typeof content !== 'string') return res.status(400).json({ error: 'content is required' });
-    const boardId = req.params.boardId;
-    const board = await dbGet('SELECT id FROM boards WHERE id = ?', [boardId]);
-    if (!board) return res.status(404).json({ error: 'Board not found' });
-    const id = uuidv4().replace(/-/g, '').substring(0, 12);
-    const now = Date.now();
-    await dbRun(
-      'INSERT INTO board_scripts (id, board_id, name, content, created_at) VALUES (?, ?, ?, ?, ?)',
-      [id, boardId, name, content, now]
-    );
-    res.status(201).json({ id, board_id: boardId, name, content, created_at: now });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/boards/:boardId/scripts', async (req, res) => {
-  try {
-    const boardId = req.params.boardId;
-    const board = await dbGet('SELECT id FROM boards WHERE id = ?', [boardId]);
-    if (!board) return res.status(404).json({ error: 'Board not found' });
-    const rows = await dbAll(
-      'SELECT id, board_id, name, created_at FROM board_scripts WHERE board_id = ? ORDER BY created_at DESC',
-      [boardId]
-    );
-    res.json(rows);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/boards/:boardId/scripts/:scriptId', async (req, res) => {
-  try {
-    const row = await dbGet(
-      'SELECT * FROM board_scripts WHERE id = ? AND board_id = ?',
-      [req.params.scriptId, req.params.boardId]
-    );
-    if (!row) return res.status(404).json({ error: 'Script not found' });
-    res.json({ id: row.id, board_id: row.board_id, name: row.name, content: row.content, created_at: row.created_at });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.delete('/api/boards/:boardId/scripts/:scriptId', async (req, res) => {
-  try {
-    const existing = await dbGet(
-      'SELECT id FROM board_scripts WHERE id = ? AND board_id = ?',
-      [req.params.scriptId, req.params.boardId]
-    );
-    if (!existing) return res.status(404).json({ error: 'Script not found' });
-    await dbRun('DELETE FROM board_scripts WHERE id = ?', [req.params.scriptId]);
-    res.json({ ok: true });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
 
 app.post('/api/rules', async (req, res) => {
   try {
