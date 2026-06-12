@@ -30,6 +30,14 @@
                     <span class="icon">▩</span>
                     <span class="label">铜区</span>
                 </button>
+                <button class="tool-btn" id="tool-annotate" title="批注评审 (A)">
+                    <span class="icon">💬</span>
+                    <span class="label">批注</span>
+                </button>
+                <button class="tool-btn" id="tool-area-annotate" title="区域批注 (Shift+A)">
+                    <span class="icon">🔲</span>
+                    <span class="label">区域批注</span>
+                </button>
             </div>
 
             <div class="toolbar-separator"></div>
@@ -261,6 +269,51 @@
                 <button class="report-btn primary" id="btn-recheck">重新检查</button>
             </div>
         </div>
+
+        <div class="annotation-panel" id="annotation-panel">
+            <div class="annotation-resizer" id="annotation-resizer"></div>
+            <div class="annotation-header">
+                <span class="annotation-title">评审批注</span>
+                <button class="annotation-close" id="annotation-close">×</button>
+            </div>
+            <div class="annotation-stats" id="annotation-stats">
+                <div class="ann-stat-item">
+                    <span class="ann-stat-label">总计</span>
+                    <span class="ann-stat-value" id="ann-stat-total">0</span>
+                </div>
+                <div class="ann-stat-item">
+                    <span class="ann-stat-label">未解决</span>
+                    <span class="ann-stat-value open" id="ann-stat-open">0</span>
+                </div>
+                <div class="ann-stat-item">
+                    <span class="ann-stat-label">已解决</span>
+                    <span class="ann-stat-value resolved" id="ann-stat-resolved">0</span>
+                </div>
+                <div class="ann-stat-item">
+                    <span class="ann-stat-label">高优</span>
+                    <span class="ann-stat-value high" id="ann-stat-high">0</span>
+                </div>
+            </div>
+            <div class="annotation-filters" id="annotation-filters">
+                <select id="ann-filter-status" class="ann-filter-select">
+                    <option value="all">全部状态</option>
+                    <option value="open">未解决</option>
+                    <option value="resolved">已解决</option>
+                </select>
+                <select id="ann-filter-priority" class="ann-filter-select">
+                    <option value="all">全部优先级</option>
+                    <option value="high">高</option>
+                    <option value="medium">中</option>
+                    <option value="low">低</option>
+                </select>
+                <select id="ann-filter-assignee" class="ann-filter-select">
+                    <option value="all">全部指派人</option>
+                </select>
+            </div>
+            <div class="annotation-list" id="annotation-list">
+                <div class="empty-message">暂无批注</div>
+            </div>
+        </div>
         </div>
 
         <div class="status-bar">
@@ -283,6 +336,10 @@
             <div class="status-item">
                 <span class="status-label">DRC违规:</span>
                 <span id="drc-count" class="status-value ok">0</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">批注:</span>
+                <span id="annotation-count" class="status-value ok">0</span>
             </div>
             <div class="status-item">
                 <span class="status-label">最小间距:</span>
@@ -344,9 +401,66 @@
         </div>
     </div>
 
+    <div class="annotation-create-dialog" id="annotation-create-dialog">
+        <div class="ann-dialog-header">
+            <span>新建批注</span>
+            <button class="ann-dialog-close" id="ann-create-close">×</button>
+        </div>
+        <div class="ann-dialog-body">
+            <div class="ann-dialog-target" id="ann-create-target-info"></div>
+            <div class="ann-dialog-field">
+                <label>问题描述</label>
+                <textarea id="ann-create-description" rows="4" placeholder="请描述问题..."></textarea>
+            </div>
+            <div class="ann-dialog-row">
+                <div class="ann-dialog-field">
+                    <label>优先级</label>
+                    <select id="ann-create-priority">
+                        <option value="low">低</option>
+                        <option value="medium" selected>中</option>
+                        <option value="high">高</option>
+                    </select>
+                </div>
+                <div class="ann-dialog-field">
+                    <label>指派人</label>
+                    <input type="text" id="ann-create-assignee" placeholder="输入指派人...">
+                </div>
+            </div>
+        </div>
+        <div class="ann-dialog-actions">
+            <button class="ann-dialog-btn" id="ann-create-cancel-btn">取消</button>
+            <button class="ann-dialog-btn primary" id="ann-create-submit-btn">创建批注</button>
+        </div>
+    </div>
+
+    <div class="annotation-detail-dialog" id="annotation-detail-dialog">
+        <div class="ann-dialog-header">
+            <span id="ann-detail-title">批注详情</span>
+            <button class="ann-dialog-close" id="ann-detail-close">×</button>
+        </div>
+        <div class="ann-dialog-body">
+            <div class="ann-detail-meta" id="ann-detail-meta"></div>
+            <div class="ann-detail-deleted-warn" id="ann-detail-deleted-warn" style="display:none;">
+                ⚠ 目标元素已不存在
+            </div>
+            <div class="ann-detail-description" id="ann-detail-description"></div>
+            <div class="ann-detail-replies" id="ann-detail-replies"></div>
+            <div class="ann-detail-reply-input">
+                <textarea id="ann-detail-reply-text" rows="2" placeholder="输入回复..."></textarea>
+                <button class="ann-dialog-btn primary" id="ann-detail-reply-btn">回复</button>
+            </div>
+        </div>
+        <div class="ann-dialog-actions">
+            <button class="ann-dialog-btn danger" id="ann-detail-delete-btn">删除</button>
+            <button class="ann-dialog-btn" id="ann-detail-locate-btn">定位</button>
+            <button class="ann-dialog-btn" id="ann-detail-status-btn">标记已解决</button>
+        </div>
+    </div>
+
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="js/geometry.js"></script>
     <script src="js/state.js"></script>
+    <script src="js/annotation.js"></script>
     <script src="js/scriptEngine.js"></script>
     <script src="js/collaboration.js"></script>
     <script src="js/drc.js"></script>

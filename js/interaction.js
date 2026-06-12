@@ -12,6 +12,10 @@ const Interaction = (function() {
     let isResizingPanel = false;
     let resizeStartX = 0;
     let resizeStartWidth = 0;
+    let areaAnnotateStart = null;
+    let areaAnnotateEnd = null;
+    let isAreaAnnotating = false;
+    let pendingAnnotationTarget = null;
 
     const DOUBLE_CLICK_TIME = 300;
     const DOUBLE_CLICK_DIST = 5;
@@ -91,6 +95,10 @@ const Interaction = (function() {
             handleViaMouseDown(snapped);
         } else if (tool === 'copper') {
             handleCopperPourMouseDown(snapped);
+        } else if (tool === 'annotate') {
+            handleAnnotateMouseDown(snapped, e);
+        } else if (tool === 'areaAnnotate') {
+            handleAreaAnnotateMouseDown(snapped);
         }
 
         refreshUI();
@@ -161,6 +169,10 @@ const Interaction = (function() {
         if (tool === 'copper' && drawingCopper) {
         }
 
+        if (tool === 'areaAnnotate' && isAreaAnnotating && areaAnnotateStart) {
+            areaAnnotateEnd = { x: snapped.x, y: snapped.y };
+        }
+
         updateCoordDisplay(worldPos);
 
         Render.render();
@@ -180,6 +192,23 @@ const Interaction = (function() {
             Render.setDragState(null);
             DRC.runCheck();
             updateDRCDisplay();
+        }
+
+        if (isAreaAnnotating && areaAnnotateStart && areaAnnotateEnd) {
+            const x = Math.min(areaAnnotateStart.x, areaAnnotateEnd.x);
+            const y = Math.min(areaAnnotateStart.y, areaAnnotateEnd.y);
+            const w = Math.abs(areaAnnotateEnd.x - areaAnnotateStart.x);
+            const h = Math.abs(areaAnnotateEnd.y - areaAnnotateStart.y);
+            if (w > 0.5 && h > 0.5) {
+                pendingAnnotationTarget = {
+                    target_type: 'area',
+                    area_rect: { x, y, w, h }
+                };
+                showAnnotationCreateDialog();
+            }
+            isAreaAnnotating = false;
+            areaAnnotateStart = null;
+            areaAnnotateEnd = null;
         }
 
         isMouseDown = false;
@@ -354,6 +383,8 @@ const Interaction = (function() {
         else if (e.code === 'KeyP') selectTool('pad');
         else if (e.code === 'KeyT') selectTool('track');
         else if (e.code === 'KeyC') selectTool('copper');
+        else if (e.code === 'KeyA' && !e.shiftKey) selectTool('annotate');
+        else if (e.code === 'KeyA' && e.shiftKey) selectTool('areaAnnotate');
     }
 
     function onKeyUp(e) {
@@ -648,6 +679,20 @@ const Interaction = (function() {
 
         Render.setCurrentTool(tool);
         updateToolButtons();
+
+        if (tool !== 'areaAnnotate') {
+            isAreaAnnotating = false;
+            areaAnnotateStart = null;
+            areaAnnotateEnd = null;
+        }
+
+        if (tool === 'annotate' || tool === 'areaAnnotate') {
+            const annPanel = document.getElementById('annotation-panel');
+            if (!annPanel.classList.contains('open')) {
+                openAnnotationPanel();
+            }
+        }
+
         Render.render();
         refreshUI();
     }
@@ -660,7 +705,7 @@ const Interaction = (function() {
         const btn = document.getElementById('tool-' + tool);
         if (btn) btn.classList.add('active');
 
-        const toolNames = { select: '选择', pad: '焊盘', track: '走线', via: '过孔', copper: '铜区' };
+        const toolNames = { select: '选择', pad: '焊盘', track: '走线', via: '过孔', copper: '铜区', annotate: '批注', areaAnnotate: '区域批注' };
         document.getElementById('current-tool').textContent = toolNames[tool] || tool;
     }
 
@@ -730,6 +775,8 @@ const Interaction = (function() {
         document.getElementById('tool-track').addEventListener('click', () => selectTool('track'));
         document.getElementById('tool-via').addEventListener('click', () => selectTool('via'));
         document.getElementById('tool-copper').addEventListener('click', () => selectTool('copper'));
+        document.getElementById('tool-annotate').addEventListener('click', () => selectTool('annotate'));
+        document.getElementById('tool-area-annotate').addEventListener('click', () => selectTool('areaAnnotate'));
 
         document.getElementById('layer-front').addEventListener('click', () => {
             Render.setDisplayLayers('front');
@@ -1119,6 +1166,323 @@ const Interaction = (function() {
         });
     }
 
+    function handleAnnotateMouseDown(pos, e) {
+        if (!isInsideBoard(pos)) return;
+
+        const annotationsAt = Annotation.findAtPosition(pos, 1.5);
+        if (annotationsAt.length > 0) {
+            showAnnotationDetailDialog(annotationsAt[0].id);
+            return;
+        }
+
+        const view = Render.getViewState();
+        const found = PCBState.findElementAt(pos, view.displayLayers === 'both' ? null : view.currentLayer);
+        if (found) {
+            const targetPos = found.type === 'pad' || found.type === 'via'
+                ? { x: found.element.x, y: found.element.y }
+                : found.type === 'track'
+                    ? found.element.points[Math.floor(found.element.points.length / 2)]
+                    : found.element.points ? found.element.points[0] : pos;
+            pendingAnnotationTarget = {
+                target_type: 'element',
+                target_element_type: found.type,
+                target_element_id: found.element.id,
+                target_position: targetPos
+            };
+        } else {
+            pendingAnnotationTarget = {
+                target_type: 'element',
+                target_element_type: null,
+                target_element_id: null,
+                target_position: { x: pos.x, y: pos.y }
+            };
+        }
+        showAnnotationCreateDialog();
+    }
+
+    function handleAreaAnnotateMouseDown(pos) {
+        if (!isInsideBoard(pos)) return;
+        areaAnnotateStart = { x: pos.x, y: pos.y };
+        areaAnnotateEnd = { x: pos.x, y: pos.y };
+        isAreaAnnotating = true;
+    }
+
+    function showAnnotationCreateDialog() {
+        const dialog = document.getElementById('annotation-create-dialog');
+        const targetInfo = document.getElementById('ann-create-target-info');
+        document.getElementById('ann-create-description').value = '';
+        document.getElementById('ann-create-priority').value = 'medium';
+        document.getElementById('ann-create-assignee').value = '';
+
+        if (pendingAnnotationTarget) {
+            if (pendingAnnotationTarget.target_type === 'element' && pendingAnnotationTarget.target_element_type) {
+                const typeNames = { pad: '焊盘', via: '过孔', track: '走线', copperPour: '铜区' };
+                targetInfo.textContent = `目标: ${typeNames[pendingAnnotationTarget.target_element_type] || pendingAnnotationTarget.target_element_type} #${pendingAnnotationTarget.target_element_id}`;
+            } else if (pendingAnnotationTarget.target_type === 'area') {
+                targetInfo.textContent = `区域: (${pendingAnnotationTarget.area_rect.x.toFixed(1)}, ${pendingAnnotationTarget.area_rect.y.toFixed(1)}) - ${pendingAnnotationTarget.area_rect.w.toFixed(1)}×${pendingAnnotationTarget.area_rect.h.toFixed(1)} mm`;
+            } else {
+                targetInfo.textContent = '位置: 自由标注';
+            }
+        }
+
+        dialog.classList.add('show');
+    }
+
+    function hideAnnotationCreateDialog() {
+        document.getElementById('annotation-create-dialog').classList.remove('show');
+        pendingAnnotationTarget = null;
+    }
+
+    function showAnnotationDetailDialog(annId) {
+        const ann = Annotation.findById(annId);
+        if (!ann) return;
+
+        const dialog = document.getElementById('annotation-detail-dialog');
+        const metaEl = document.getElementById('ann-detail-meta');
+        const descEl = document.getElementById('ann-detail-description');
+        const repliesEl = document.getElementById('ann-detail-replies');
+        const deletedWarn = document.getElementById('ann-detail-deleted-warn');
+        const statusBtn = document.getElementById('ann-detail-status-btn');
+
+        const typeNames = { pad: '焊盘', via: '过孔', track: '走线', copperPour: '铜区' };
+        const priorityNames = { high: '高', medium: '中', low: '低' };
+        const date = new Date(ann.created_at);
+        const timeStr = date.toLocaleString('zh-CN');
+
+        let metaHtml = `
+            <div class="ann-meta-row">
+                <span class="ann-meta-label">创建者:</span>
+                <span class="ann-meta-value">${escapeHtml(ann.created_by)}</span>
+            </div>
+            <div class="ann-meta-row">
+                <span class="ann-meta-label">时间:</span>
+                <span class="ann-meta-value">${timeStr}</span>
+            </div>
+            <div class="ann-meta-row">
+                <span class="ann-meta-label">优先级:</span>
+                <span class="ann-meta-value priority-${ann.priority}">${priorityNames[ann.priority] || ann.priority}</span>
+            </div>
+            <div class="ann-meta-row">
+                <span class="ann-meta-label">指派人:</span>
+                <span class="ann-meta-value">${escapeHtml(ann.assignee || '未指定')}</span>
+            </div>
+            <div class="ann-meta-row">
+                <span class="ann-meta-label">状态:</span>
+                <span class="ann-meta-value status-${ann.status}">${ann.status === 'open' ? '未解决' : '已解决'}</span>
+            </div>
+        `;
+        if (ann.target_type === 'element' && ann.target_element_type) {
+            metaHtml += `<div class="ann-meta-row"><span class="ann-meta-label">目标:</span><span class="ann-meta-value">${typeNames[ann.target_element_type] || ann.target_element_type} #${ann.target_element_id}</span></div>`;
+        } else if (ann.target_type === 'area') {
+            metaHtml += `<div class="ann-meta-row"><span class="ann-meta-label">类型:</span><span class="ann-meta-value">区域批注</span></div>`;
+        }
+        metaEl.innerHTML = metaHtml;
+
+        const elementExists = Annotation.isTargetElementExisting(ann);
+        deletedWarn.style.display = (!elementExists && ann.target_type === 'element') ? 'block' : 'none';
+
+        descEl.textContent = ann.description;
+
+        let repliesHtml = '';
+        if (ann.replies && ann.replies.length > 0) {
+            for (const reply of ann.replies) {
+                const rDate = new Date(reply.created_at);
+                const rTime = rDate.toLocaleString('zh-CN');
+                repliesHtml += `
+                    <div class="ann-reply-item">
+                        <div class="ann-reply-header">
+                            <span class="ann-reply-author">${escapeHtml(reply.author)}</span>
+                            <span class="ann-reply-time">${rTime}</span>
+                        </div>
+                        <div class="ann-reply-content">${escapeHtml(reply.content)}</div>
+                    </div>
+                `;
+            }
+        } else {
+            repliesHtml = '<div class="empty-message">暂无回复</div>';
+        }
+        repliesEl.innerHTML = repliesHtml;
+
+        document.getElementById('ann-detail-reply-text').value = '';
+
+        statusBtn.textContent = ann.status === 'open' ? '标记已解决' : '重新打开';
+        statusBtn.onclick = () => {
+            if (ann.status === 'open') {
+                Annotation.resolveAnnotation(annId).then(() => {
+                    showAnnotationDetailDialog(annId);
+                    Render.render();
+                });
+            } else {
+                Annotation.reopenAnnotation(annId).then(() => {
+                    showAnnotationDetailDialog(annId);
+                    Render.render();
+                });
+            }
+        };
+
+        dialog.dataset.annotationId = annId;
+        dialog.classList.add('show');
+    }
+
+    function hideAnnotationDetailDialog() {
+        const dialog = document.getElementById('annotation-detail-dialog');
+        dialog.classList.remove('show');
+        delete dialog.dataset.annotationId;
+    }
+
+    function escapeHtml(s) {
+        const div = document.createElement('div');
+        div.textContent = s;
+        return div.innerHTML;
+    }
+
+    function renderAnnotationPanel() {
+        const annotations = Annotation.getAnnotations();
+        const stats = Annotation.getStats();
+        const listEl = document.getElementById('annotation-list');
+
+        document.getElementById('ann-stat-total').textContent = stats.total;
+        document.getElementById('ann-stat-open').textContent = stats.open;
+        document.getElementById('ann-stat-resolved').textContent = stats.resolved;
+        document.getElementById('ann-stat-high').textContent = stats.high;
+
+        const assignees = Annotation.getUniqueAssignees();
+        const assigneeSelect = document.getElementById('ann-filter-assignee');
+        const currentAssignee = assigneeSelect.value;
+        assigneeSelect.innerHTML = '<option value="all">全部指派人</option>';
+        for (const a of assignees) {
+            const opt = document.createElement('option');
+            opt.value = a;
+            opt.textContent = a;
+            if (a === currentAssignee) opt.selected = true;
+            assigneeSelect.appendChild(opt);
+        }
+
+        if (annotations.length === 0) {
+            listEl.innerHTML = '<div class="empty-message">暂无批注</div>';
+            return;
+        }
+
+        const priorityNames = { high: '高', medium: '中', low: '低' };
+        const typeNames = { pad: '焊盘', via: '过孔', track: '走线', copperPour: '铜区' };
+
+        let html = '';
+        for (const ann of annotations) {
+            const elementExists = Annotation.isTargetElementExisting(ann);
+            const deletedTag = (!elementExists && ann.target_type === 'element') ? '<span class="ann-deleted-tag">已删除</span>' : '';
+            const typeTag = ann.target_type === 'area' ? '区域' : (typeNames[ann.target_element_type] || '自由');
+            const date = new Date(ann.created_at);
+            const timeStr = date.toLocaleString('zh-CN');
+
+            html += `
+                <div class="ann-list-item priority-${ann.priority} status-${ann.status}" data-ann-id="${ann.id}">
+                    <div class="ann-list-header">
+                        <span class="ann-list-type">${typeTag}${deletedTag}</span>
+                        <span class="ann-list-priority ${ann.priority}">${priorityNames[ann.priority]}</span>
+                        <span class="ann-list-status ${ann.status}">${ann.status === 'open' ? '未解决' : '已解决'}</span>
+                    </div>
+                    <div class="ann-list-desc">${escapeHtml(ann.description)}</div>
+                    <div class="ann-list-footer">
+                        <span class="ann-list-assignee">${ann.assignee ? escapeHtml(ann.assignee) : '未指派'}</span>
+                        <span class="ann-list-replies">${ann.replies ? ann.replies.length : 0} 回复</span>
+                        <span class="ann-list-time">${timeStr}</span>
+                    </div>
+                </div>
+            `;
+        }
+        listEl.innerHTML = html;
+
+        listEl.querySelectorAll('.ann-list-item').forEach(item => {
+            item.addEventListener('click', () => {
+                const annId = item.dataset.annId;
+                const ann = Annotation.findById(annId);
+                if (ann) {
+                    const markerPos = Annotation.getAnnotationMarkerPosition(ann);
+                    if (markerPos) {
+                        const view = Render.getViewState();
+                        const targetScale = Math.max(view.scale, 15);
+                        Render.centerOnPosition(markerPos, targetScale);
+                        Render.startPulseAnimation(markerPos);
+                        updateZoomDisplay();
+                    }
+                }
+            });
+            item.addEventListener('dblclick', () => {
+                showAnnotationDetailDialog(item.dataset.annId);
+            });
+        });
+    }
+
+    function toggleAnnotationPanel() {
+        const panel = document.getElementById('annotation-panel');
+        if (panel.classList.contains('open')) {
+            closeAnnotationPanel();
+        } else {
+            openAnnotationPanel();
+        }
+    }
+
+    function openAnnotationPanel() {
+        const panel = document.getElementById('annotation-panel');
+        panel.classList.add('open');
+        renderAnnotationPanel();
+        Render.render();
+    }
+
+    function closeAnnotationPanel() {
+        const panel = document.getElementById('annotation-panel');
+        panel.classList.remove('open');
+        Render.render();
+    }
+
+    function updateAnnotationStatusBar() {
+        const count = Annotation.getOpenCount();
+        const el = document.getElementById('annotation-count');
+        if (el) {
+            el.textContent = count;
+            el.classList.remove('ok', 'warning');
+            el.classList.add(count > 0 ? 'warning' : 'ok');
+        }
+    }
+
+    function initAnnotationPanelResizer() {
+        const resizer = document.getElementById('annotation-resizer');
+        const panel = document.getElementById('annotation-panel');
+        if (!resizer || !panel) return;
+
+        let isResizingAnn = false;
+        let annResizeStartX = 0;
+        let annResizeStartWidth = 0;
+
+        resizer.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            isResizingAnn = true;
+            annResizeStartX = e.clientX;
+            annResizeStartWidth = panel.offsetWidth;
+            resizer.classList.add('active');
+            document.body.style.cursor = 'ew-resize';
+            document.body.style.userSelect = 'none';
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isResizingAnn) return;
+            const delta = annResizeStartX - e.clientX;
+            let newWidth = annResizeStartWidth + delta;
+            newWidth = Math.max(200, Math.min(400, newWidth));
+            panel.style.width = newWidth + 'px';
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isResizingAnn) {
+                isResizingAnn = false;
+                resizer.classList.remove('active');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                setTimeout(() => Render.render(), 50);
+            }
+        });
+    }
+
     return {
         init,
         bindToolbarEvents,
@@ -1135,6 +1499,18 @@ const Interaction = (function() {
         renderReportPanel,
         clearAllHighlights,
         recheckReport,
-        initPanelResizer
+        initPanelResizer,
+        toggleAnnotationPanel,
+        openAnnotationPanel,
+        closeAnnotationPanel,
+        renderAnnotationPanel,
+        updateAnnotationStatusBar,
+        initAnnotationPanelResizer,
+        showAnnotationDetailDialog,
+        hideAnnotationCreateDialog,
+        hideAnnotationDetailDialog,
+        get pendingAnnotationTarget() { return pendingAnnotationTarget; },
+        get _areaAnnotateStart() { return areaAnnotateStart; },
+        get _areaAnnotateEnd() { return areaAnnotateEnd; }
     };
 })();

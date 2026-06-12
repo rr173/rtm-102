@@ -135,6 +135,36 @@ function getOperator(req) {
       FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE
     )
   `);
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS annotations (
+      id TEXT PRIMARY KEY,
+      board_id TEXT NOT NULL,
+      target_type TEXT NOT NULL,
+      target_element_type TEXT,
+      target_element_id INTEGER,
+      target_position TEXT,
+      area_rect TEXT,
+      description TEXT NOT NULL,
+      priority TEXT NOT NULL DEFAULT 'medium',
+      assignee TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'open',
+      created_by TEXT NOT NULL DEFAULT 'anonymous',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      version_created INTEGER NOT NULL DEFAULT 1,
+      FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE
+    )
+  `);
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS annotation_replies (
+      id TEXT PRIMARY KEY,
+      annotation_id TEXT NOT NULL,
+      content TEXT NOT NULL,
+      author TEXT NOT NULL DEFAULT 'anonymous',
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (annotation_id) REFERENCES annotations(id) ON DELETE CASCADE
+    )
+  `);
   await audit.initTable();
   await locks.initTable();
   await templates.initTable();
@@ -148,6 +178,179 @@ function getOperator(req) {
   diff.mountDiffRoutes(app);
   mountBomRoutes(app, { getLatestVersion });
   mountSimulationRoutes(app, { getLatestVersion });
+
+  app.get('/api/boards/:boardId/annotations', async (req, res) => {
+    try {
+      const board = await dbGet('SELECT id FROM boards WHERE id = ?', [req.params.boardId]);
+      if (!board) return res.status(404).json({ error: 'Board not found' });
+      const version = req.query.version ? parseInt(req.query.version) : null;
+      let rows;
+      if (version) {
+        rows = await dbAll(
+          'SELECT * FROM annotations WHERE board_id = ? AND version_created <= ? ORDER BY created_at DESC',
+          [req.params.boardId, version]
+        );
+      } else {
+        rows = await dbAll(
+          'SELECT * FROM annotations WHERE board_id = ? ORDER BY created_at DESC',
+          [req.params.boardId]
+        );
+      }
+      const annotations = rows.map(formatAnnotationRow);
+      for (const ann of annotations) {
+        const replies = await dbAll(
+          'SELECT * FROM annotation_replies WHERE annotation_id = ? ORDER BY created_at ASC',
+          [ann.id]
+        );
+        ann.replies = replies.map(formatReplyRow);
+      }
+      res.json(annotations);
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/boards/:boardId/annotations/:annId', async (req, res) => {
+    try {
+      const row = await dbGet(
+        'SELECT * FROM annotations WHERE id = ? AND board_id = ?',
+        [req.params.annId, req.params.boardId]
+      );
+      if (!row) return res.status(404).json({ error: 'Annotation not found' });
+      const ann = formatAnnotationRow(row);
+      const replies = await dbAll(
+        'SELECT * FROM annotation_replies WHERE annotation_id = ? ORDER BY created_at ASC',
+        [ann.id]
+      );
+      ann.replies = replies.map(formatReplyRow);
+      res.json(ann);
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/boards/:boardId/annotations', async (req, res) => {
+    try {
+      const board = await dbGet('SELECT id FROM boards WHERE id = ?', [req.params.boardId]);
+      if (!board) return res.status(404).json({ error: 'Board not found' });
+      const { target_type, target_element_type, target_element_id, target_position, area_rect, description, priority, assignee } = req.body || {};
+      if (!target_type || !['element', 'area'].includes(target_type)) return res.status(400).json({ error: 'target_type must be element or area' });
+      if (!description || typeof description !== 'string') return res.status(400).json({ error: 'description is required' });
+      const latest = await getLatestVersion(req.params.boardId);
+      const versionCreated = latest ? latest.version : 1;
+      const id = uuidv4().replace(/-/g, '').substring(0, 12);
+      const now = Date.now();
+      const operator = getOperator(req);
+      await dbRun(
+        'INSERT INTO annotations (id, board_id, target_type, target_element_type, target_element_id, target_position, area_rect, description, priority, assignee, status, created_by, created_at, updated_at, version_created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [id, req.params.boardId, target_type, target_element_type || null, target_element_id || null, target_position ? JSON.stringify(target_position) : null, area_rect ? JSON.stringify(area_rect) : null, description, priority || 'medium', assignee || '', 'open', operator, now, now, versionCreated]
+      );
+      const ann = { id, board_id: req.params.boardId, target_type, target_element_type: target_element_type || null, target_element_id: target_element_id || null, target_position: target_position || null, area_rect: area_rect || null, description, priority: priority || 'medium', assignee: assignee || '', status: 'open', created_by: operator, created_at: now, updated_at: now, version_created: versionCreated, replies: [] };
+      broadcast(req.params.boardId, { type: 'annotationCreated', payload: ann });
+      res.status(201).json(ann);
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.put('/api/boards/:boardId/annotations/:annId', async (req, res) => {
+    try {
+      const existing = await dbGet('SELECT * FROM annotations WHERE id = ? AND board_id = ?', [req.params.annId, req.params.boardId]);
+      if (!existing) return res.status(404).json({ error: 'Annotation not found' });
+      const { description, priority, assignee, status } = req.body || {};
+      const now = Date.now();
+      const finalDesc = description !== undefined ? description : existing.description;
+      const finalPriority = priority !== undefined ? priority : existing.priority;
+      const finalAssignee = assignee !== undefined ? assignee : existing.assignee;
+      const finalStatus = status !== undefined ? status : existing.status;
+      await dbRun(
+        'UPDATE annotations SET description = ?, priority = ?, assignee = ?, status = ?, updated_at = ? WHERE id = ?',
+        [finalDesc, finalPriority, finalAssignee, finalStatus, now, req.params.annId]
+      );
+      const ann = formatAnnotationRow({ ...existing, description: finalDesc, priority: finalPriority, assignee: finalAssignee, status: finalStatus, updated_at: now });
+      const replies = await dbAll('SELECT * FROM annotation_replies WHERE annotation_id = ? ORDER BY created_at ASC', [ann.id]);
+      ann.replies = replies.map(formatReplyRow);
+      broadcast(req.params.boardId, { type: 'annotationUpdated', payload: ann });
+      res.json(ann);
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/boards/:boardId/annotations/:annId', async (req, res) => {
+    try {
+      const existing = await dbGet('SELECT id FROM annotations WHERE id = ? AND board_id = ?', [req.params.annId, req.params.boardId]);
+      if (!existing) return res.status(404).json({ error: 'Annotation not found' });
+      await dbRun('DELETE FROM annotation_replies WHERE annotation_id = ?', [req.params.annId]);
+      await dbRun('DELETE FROM annotations WHERE id = ?', [req.params.annId]);
+      broadcast(req.params.boardId, { type: 'annotationDeleted', payload: { id: req.params.annId } });
+      res.json({ ok: true });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/boards/:boardId/annotations/:annId/replies', async (req, res) => {
+    try {
+      const existing = await dbGet('SELECT * FROM annotations WHERE id = ? AND board_id = ?', [req.params.annId, req.params.boardId]);
+      if (!existing) return res.status(404).json({ error: 'Annotation not found' });
+      const { content } = req.body || {};
+      if (!content || typeof content !== 'string') return res.status(400).json({ error: 'content is required' });
+      const id = uuidv4().replace(/-/g, '').substring(0, 12);
+      const now = Date.now();
+      const operator = getOperator(req);
+      await dbRun(
+        'INSERT INTO annotation_replies (id, annotation_id, content, author, created_at) VALUES (?, ?, ?, ?, ?)',
+        [id, req.params.annId, content, operator, now]
+      );
+      const reply = { id, annotation_id: req.params.annId, content, author: operator, created_at: now };
+      await dbRun('UPDATE annotations SET updated_at = ? WHERE id = ?', [now, req.params.annId]);
+      broadcast(req.params.boardId, { type: 'annotationReplyAdded', payload: { annotation_id: req.params.annId, reply } });
+      res.status(201).json(reply);
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  function formatAnnotationRow(row) {
+    let targetPosition = null;
+    let areaRect = null;
+    try { if (row.target_position) targetPosition = JSON.parse(row.target_position); } catch (e) {}
+    try { if (row.area_rect) areaRect = JSON.parse(row.area_rect); } catch (e) {}
+    return {
+      id: row.id,
+      board_id: row.board_id,
+      target_type: row.target_type,
+      target_element_type: row.target_element_type,
+      target_element_id: row.target_element_id,
+      target_position: targetPosition,
+      area_rect: areaRect,
+      description: row.description,
+      priority: row.priority,
+      assignee: row.assignee,
+      status: row.status,
+      created_by: row.created_by,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      version_created: row.version_created
+    };
+  }
+
+  function formatReplyRow(row) {
+    return {
+      id: row.id,
+      annotation_id: row.annotation_id,
+      content: row.content,
+      author: row.author,
+      created_at: row.created_at
+    };
+  }
 
   app.post('/api/boards/:boardId/scripts', async (req, res) => {
     try {
@@ -731,6 +934,17 @@ wss.on('connection', async (ws, req) => {
     }
     ws.send(JSON.stringify({ type: 'onlineCount', payload: { count: boardClients[boardId].length } }));
     broadcastOnlineCount(boardId);
+    try {
+      const annRows = await dbAll('SELECT * FROM annotations WHERE board_id = ? ORDER BY created_at DESC', [boardId]);
+      const annotations = annRows.map(formatAnnotationRow);
+      for (const ann of annotations) {
+        const replies = await dbAll('SELECT * FROM annotation_replies WHERE annotation_id = ? ORDER BY created_at ASC', [ann.id]);
+        ann.replies = replies.map(formatReplyRow);
+      }
+      ws.send(JSON.stringify({ type: 'annotationsInit', payload: { annotations } }));
+    } catch (e2) {
+      console.error('Failed to send annotations init:', e2);
+    }
   } catch (e) {
     console.error(e);
   }

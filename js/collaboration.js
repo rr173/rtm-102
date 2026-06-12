@@ -6,6 +6,7 @@ const Collaboration = (function() {
     let isReadOnly = false;
     let previewVersion = null;
     let previewState = null;
+    let previewAnnotations = null;
     let listeners = {};
 
     function on(event, cb) {
@@ -87,6 +88,19 @@ const Collaboration = (function() {
                 onlineCount = msg.payload.count;
                 emit('onlineCount', onlineCount);
                 break;
+            case 'annotationsInit':
+                if (typeof Annotation !== 'undefined') {
+                    Annotation.loadFromServer(msg.payload);
+                }
+                break;
+            case 'annotationCreated':
+            case 'annotationUpdated':
+            case 'annotationDeleted':
+            case 'annotationReplyAdded':
+                if (typeof Annotation !== 'undefined') {
+                    Annotation.handleRemoteMessage(msg);
+                }
+                break;
             case 'revert':
                 currentVersion = msg.payload.version;
                 PCBState.setState(msg.payload.state, { silent: true, noEmit: true });
@@ -123,6 +137,11 @@ const Collaboration = (function() {
         const data = await fetchVersion(ver);
         previewVersion = ver;
         previewState = PCBState.getState();
+        if (typeof Annotation !== 'undefined') {
+            previewAnnotations = Annotation.getAllAnnotations();
+            const versionAnnotations = await Annotation.fetchForVersion(ver);
+            Annotation.setAnnotationsList(versionAnnotations);
+        }
         isReadOnly = true;
         PCBState.setState(data.state, { silent: true, noEmit: true });
         emit('previewEnter', { version: ver });
@@ -132,6 +151,10 @@ const Collaboration = (function() {
     function exitPreview() {
         if (previewState) {
             PCBState.setState(previewState, { silent: true, noEmit: true });
+        }
+        if (typeof Annotation !== 'undefined' && previewAnnotations) {
+            Annotation.setAnnotationsList(previewAnnotations);
+            previewAnnotations = null;
         }
         previewVersion = null;
         previewState = null;

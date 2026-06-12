@@ -40,7 +40,15 @@ const Render = (function() {
         previewPad: 'rgba(46, 204, 113, 0.55)',
         previewTrack: 'rgba(46, 204, 113, 0.5)',
         previewVia: 'rgba(46, 204, 113, 0.6)',
-        previewPour: 'rgba(46, 204, 113, 0.25)'
+        previewPour: 'rgba(46, 204, 113, 0.25)',
+        annotationOpen: '#e94560',
+        annotationResolved: '#2ecc71',
+        annotationArea: 'rgba(233, 69, 96, 0.15)',
+        annotationAreaBorder: 'rgba(233, 69, 96, 0.8)',
+        annotationDeleted: '#f39c12',
+        annotationHigh: '#e74c3c',
+        annotationMedium: '#f39c12',
+        annotationLow: '#3498db'
     };
 
     let canvas, ctx;
@@ -308,6 +316,8 @@ const Render = (function() {
         if (reportState.pulseTarget) {
             drawPulseAnimation();
         }
+
+        drawAnnotations();
 
         if (interactionState.hoverPoint) {
             drawCursor();
@@ -1132,6 +1142,173 @@ const Render = (function() {
             buildPolygonPath(pour.points);
             ctx.stroke();
         }
+
+        ctx.restore();
+    }
+
+    function drawAnnotations() {
+        if (typeof Annotation === 'undefined') return;
+        const annotations = Annotation.getAllAnnotations();
+        if (!annotations || annotations.length === 0) {
+            drawAreaAnnotateSelection();
+            return;
+        }
+
+        for (const ann of annotations) {
+            if (ann.target_type === 'element') {
+                drawElementAnnotation(ann);
+            } else if (ann.target_type === 'area') {
+                drawAreaAnnotation(ann);
+            }
+        }
+
+        drawAreaAnnotateSelection();
+    }
+
+    function drawAreaAnnotateSelection() {
+        const tool = interactionState.currentTool;
+        if (tool !== 'areaAnnotate') return;
+
+        const interaction = typeof Interaction !== 'undefined' ? Interaction : null;
+        if (!interaction) return;
+
+        const start = interaction._areaAnnotateStart;
+        const end = interaction._areaAnnotateEnd;
+        if (!start || !end) return;
+
+        const x = Math.min(start.x, end.x);
+        const y = Math.min(start.y, end.y);
+        const w = Math.abs(end.x - start.x);
+        const h = Math.abs(end.y - start.y);
+        if (w < 0.1 || h < 0.1) return;
+
+        const tl = worldToScreen({ x, y });
+        const br = worldToScreen({ x: x + w, y: y + h });
+        const pw = br.x - tl.x;
+        const ph = br.y - tl.y;
+
+        ctx.save();
+        ctx.fillStyle = 'rgba(233, 69, 96, 0.1)';
+        ctx.fillRect(tl.x, tl.y, pw, ph);
+        ctx.strokeStyle = '#e94560';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 4]);
+        ctx.strokeRect(tl.x, tl.y, pw, ph);
+        ctx.setLineDash([]);
+        ctx.restore();
+    }
+
+    function drawElementAnnotation(ann) {
+        const pos = Annotation.getAnnotationMarkerPosition(ann);
+        if (!pos) return;
+
+        const screenPos = worldToScreen(pos);
+        const elementExists = Annotation.isTargetElementExisting(ann);
+        const isOpen = ann.status === 'open';
+        const priorityColor = ann.priority === 'high' ? COLORS.annotationHigh :
+                              ann.priority === 'low' ? COLORS.annotationLow :
+                              COLORS.annotationMedium;
+
+        const baseRadius = Math.max(8, viewState.scale * 0.8);
+        const markerOffset = baseRadius + 4;
+
+        const markerX = screenPos.x + markerOffset * 0.7;
+        const markerY = screenPos.y - markerOffset * 0.7;
+
+        ctx.save();
+
+        if (!elementExists) {
+            ctx.globalAlpha = 0.6;
+            ctx.strokeStyle = COLORS.annotationDeleted;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(screenPos.x - 6, screenPos.y - 6);
+            ctx.lineTo(screenPos.x + 6, screenPos.y + 6);
+            ctx.moveTo(screenPos.x + 6, screenPos.y - 6);
+            ctx.lineTo(screenPos.x - 6, screenPos.y + 6);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        ctx.globalAlpha = isOpen ? 1 : 0.5;
+
+        ctx.beginPath();
+        ctx.arc(markerX, markerY, baseRadius, 0, Math.PI * 2);
+        ctx.fillStyle = isOpen ? priorityColor : COLORS.annotationResolved;
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.fillStyle = '#fff';
+        ctx.font = `bold ${Math.max(9, baseRadius)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        if (!elementExists) {
+            ctx.fillText('!', markerX, markerY);
+        } else if (ann.replies && ann.replies.length > 0) {
+            ctx.fillText(String(ann.replies.length), markerX, markerY + 1);
+        } else {
+            const text = ann.priority === 'high' ? '!' : ann.priority === 'medium' ? '?' : '•';
+            ctx.fillText(text, markerX, markerY + 1);
+        }
+
+        if (!elementExists && isOpen) {
+            ctx.strokeStyle = COLORS.annotationDeleted;
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([2, 2]);
+            ctx.beginPath();
+            ctx.arc(markerX, markerY, baseRadius + 3, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        ctx.restore();
+    }
+
+    function drawAreaAnnotation(ann) {
+        if (!ann.area_rect) return;
+        const r = ann.area_rect;
+
+        const tl = worldToScreen({ x: r.x, y: r.y });
+        const br = worldToScreen({ x: r.x + r.w, y: r.y + r.h });
+        const w = br.x - tl.x;
+        const h = br.y - tl.y;
+
+        const isOpen = ann.status === 'open';
+        const priorityColor = ann.priority === 'high' ? COLORS.annotationHigh :
+                              ann.priority === 'low' ? COLORS.annotationLow :
+                              COLORS.annotationMedium;
+
+        ctx.save();
+        ctx.globalAlpha = isOpen ? 1 : 0.4;
+
+        ctx.fillStyle = COLORS.annotationArea;
+        ctx.fillRect(tl.x, tl.y, w, h);
+
+        ctx.strokeStyle = isOpen ? COLORS.annotationAreaBorder : COLORS.annotationResolved;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.strokeRect(tl.x, tl.y, w, h);
+        ctx.setLineDash([]);
+
+        const tagX = tl.x + 4;
+        const tagY = tl.y - 4;
+        const tagW = 20;
+        const tagH = 16;
+
+        ctx.fillStyle = priorityColor;
+        ctx.beginPath();
+        ctx.roundRect(tagX, tagY - tagH, tagW, tagH, 3);
+        ctx.fill();
+
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(ann.replies ? ann.replies.length + 1 : 1), tagX + tagW / 2, tagY - tagH / 2);
 
         ctx.restore();
     }

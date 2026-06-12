@@ -103,6 +103,8 @@
         Interaction.updateDRCDisplay();
         Interaction.updateLayerButtons();
         Interaction.updateToolButtons();
+        Interaction.updateAnnotationStatusBar();
+        initAnnotationEvents();
 
         window.addEventListener('resize', () => {
             Render.render();
@@ -114,8 +116,13 @@
         Render.render();
         Interaction.updateDRCDisplay();
         Interaction.updateZoomDisplay();
-        const panel = document.getElementById('report-panel');
+        Interaction.updateAnnotationStatusBar();
+        const panel = document.getElementById('annotation-panel');
         if (panel && panel.classList.contains('open')) {
+            Interaction.renderAnnotationPanel();
+        }
+        const reportPanel = document.getElementById('report-panel');
+        if (reportPanel && reportPanel.classList.contains('open')) {
             Interaction.renderReportPanel();
         }
     }
@@ -674,6 +681,142 @@
         const div = document.createElement('div');
         div.textContent = s;
         return div.innerHTML;
+    }
+
+    let annotationEventsInitialized = false;
+
+    function initAnnotationEvents() {
+        if (annotationEventsInitialized) return;
+        annotationEventsInitialized = true;
+
+        Interaction.initAnnotationPanelResizer();
+
+        document.getElementById('annotation-close').addEventListener('click', () => {
+            Interaction.closeAnnotationPanel();
+        });
+
+        document.getElementById('ann-filter-status').addEventListener('change', (e) => {
+            Annotation.setFilter({ status: e.target.value });
+            Interaction.renderAnnotationPanel();
+        });
+
+        document.getElementById('ann-filter-priority').addEventListener('change', (e) => {
+            Annotation.setFilter({ priority: e.target.value });
+            Interaction.renderAnnotationPanel();
+        });
+
+        document.getElementById('ann-filter-assignee').addEventListener('change', (e) => {
+            Annotation.setFilter({ assignee: e.target.value });
+            Interaction.renderAnnotationPanel();
+        });
+
+        document.getElementById('ann-create-close').addEventListener('click', () => {
+            Interaction.hideAnnotationCreateDialog();
+        });
+
+        document.getElementById('ann-create-cancel-btn').addEventListener('click', () => {
+            Interaction.hideAnnotationCreateDialog();
+        });
+
+        document.getElementById('ann-create-submit-btn').addEventListener('click', async () => {
+            const desc = document.getElementById('ann-create-description').value.trim();
+            if (!desc) {
+                alert('请填写问题描述');
+                return;
+            }
+            const priority = document.getElementById('ann-create-priority').value;
+            const assignee = document.getElementById('ann-create-assignee').value.trim();
+            try {
+                await Annotation.createAnnotation({
+                    ...Interaction.pendingAnnotationTarget || {},
+                    description: desc,
+                    priority: priority,
+                    assignee: assignee
+                });
+                Interaction.hideAnnotationCreateDialog();
+                Interaction.updateAnnotationStatusBar();
+                Interaction.renderAnnotationPanel();
+                Render.render();
+            } catch (e) {
+                alert('创建批注失败: ' + e.message);
+            }
+        });
+
+        document.getElementById('ann-detail-close').addEventListener('click', () => {
+            Interaction.hideAnnotationDetailDialog();
+        });
+
+        document.getElementById('ann-detail-reply-btn').addEventListener('click', async () => {
+            const dialog = document.getElementById('annotation-detail-dialog');
+            const annId = dialog.dataset.annotationId;
+            const text = document.getElementById('ann-detail-reply-text').value.trim();
+            if (!text || !annId) return;
+            try {
+                await Annotation.addReply(annId, text);
+                Interaction.showAnnotationDetailDialog(annId);
+                Interaction.renderAnnotationPanel();
+                Render.render();
+            } catch (e) {
+                alert('回复失败: ' + e.message);
+            }
+        });
+
+        document.getElementById('ann-detail-delete-btn').addEventListener('click', async () => {
+            const dialog = document.getElementById('annotation-detail-dialog');
+            const annId = dialog.dataset.annotationId;
+            if (!annId) return;
+            if (!confirm('确定要删除此批注吗?')) return;
+            try {
+                await Annotation.deleteAnnotation(annId);
+                Interaction.hideAnnotationDetailDialog();
+                Interaction.updateAnnotationStatusBar();
+                Interaction.renderAnnotationPanel();
+                Render.render();
+            } catch (e) {
+                alert('删除失败: ' + e.message);
+            }
+        });
+
+        document.getElementById('ann-detail-locate-btn').addEventListener('click', () => {
+            const dialog = document.getElementById('annotation-detail-dialog');
+            const annId = dialog.dataset.annotationId;
+            if (!annId) return;
+            const ann = Annotation.findById(annId);
+            if (ann) {
+                const markerPos = Annotation.getAnnotationMarkerPosition(ann);
+                if (markerPos) {
+                    const view = Render.getViewState();
+                    const targetScale = Math.max(view.scale, 15);
+                    Render.centerOnPosition(markerPos, targetScale);
+                    Render.startPulseAnimation(markerPos);
+                    Interaction.updateZoomDisplay();
+                    Render.render();
+                }
+            }
+        });
+
+        Annotation.on((event, data) => {
+            if (event === 'remoteCreated' || event === 'remoteUpdated' || event === 'remoteDeleted' || event === 'remoteReplyAdded') {
+                Interaction.updateAnnotationStatusBar();
+                const panel = document.getElementById('annotation-panel');
+                if (panel && panel.classList.contains('open')) {
+                    Interaction.renderAnnotationPanel();
+                }
+                Render.render();
+            }
+        });
+
+        document.addEventListener('click', (e) => {
+            const createDialog = document.getElementById('annotation-create-dialog');
+            const detailDialog = document.getElementById('annotation-detail-dialog');
+            if (createDialog.classList.contains('show') && !createDialog.contains(e.target) &&
+                e.target.id !== 'tool-annotate' && e.target.id !== 'tool-area-annotate') {
+                Interaction.hideAnnotationCreateDialog();
+            }
+            if (detailDialog.classList.contains('show') && !detailDialog.contains(e.target)) {
+                Interaction.hideAnnotationDetailDialog();
+            }
+        });
     }
 
     if (document.readyState === 'loading') {
