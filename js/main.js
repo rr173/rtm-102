@@ -42,9 +42,22 @@
             setConnStatus('错误', 'warning');
         });
 
-        Collaboration.on('stateLoaded', (data) => {
+        Collaboration.on('stateLoaded', async (data) => {
             document.getElementById('version-label').textContent = 'v' + data.version;
             afterStateInit();
+            if (typeof Annotation !== 'undefined') {
+                try {
+                    await Annotation.fetchAll();
+                    Interaction.updateAnnotationStatusBar();
+                    const panel = document.getElementById('annotation-panel');
+                    if (panel && panel.classList.contains('open')) {
+                        Interaction.renderAnnotationPanel();
+                    }
+                    Render.render();
+                } catch (e) {
+                    console.error('Failed to load annotations on init:', e);
+                }
+            }
         });
 
         Collaboration.on('onlineCount', (count) => {

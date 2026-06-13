@@ -162,9 +162,34 @@ function getOperator(req) {
       content TEXT NOT NULL,
       author TEXT NOT NULL DEFAULT 'anonymous',
       created_at INTEGER NOT NULL,
+      version_created INTEGER NOT NULL DEFAULT 1,
       FOREIGN KEY (annotation_id) REFERENCES annotations(id) ON DELETE CASCADE
     )
   `);
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS annotation_status_history (
+      id TEXT PRIMARY KEY,
+      annotation_id TEXT NOT NULL,
+      old_status TEXT NOT NULL,
+      new_status TEXT NOT NULL,
+      author TEXT NOT NULL DEFAULT 'anonymous',
+      created_at INTEGER NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      FOREIGN KEY (annotation_id) REFERENCES annotations(id) ON DELETE CASCADE
+    )
+  `);
+  try {
+    await dbRun('ALTER TABLE annotation_replies ADD COLUMN version_created INTEGER NOT NULL DEFAULT 1');
+  } catch (e) {}
+  try {
+    await dbRun('ALTER TABLE annotations ADD COLUMN version_resolved INTEGER');
+  } catch (e) {}
+  try {
+    await dbRun('ALTER TABLE annotations ADD COLUMN resolved_at INTEGER');
+  } catch (e) {}
+  try {
+    await dbRun('ALTER TABLE annotations ADD COLUMN resolved_by TEXT');
+  } catch (e) {}
   await audit.initTable();
   await locks.initTable();
   await templates.initTable();
@@ -198,10 +223,31 @@ function getOperator(req) {
       }
       const annotations = rows.map(formatAnnotationRow);
       for (const ann of annotations) {
-        const replies = await dbAll(
-          'SELECT * FROM annotation_replies WHERE annotation_id = ? ORDER BY created_at ASC',
-          [ann.id]
-        );
+        let replies;
+        if (version) {
+          replies = await dbAll(
+            'SELECT * FROM annotation_replies WHERE annotation_id = ? AND version_created <= ? ORDER BY created_at ASC',
+            [ann.id, version]
+          );
+          const statusHistory = await dbAll(
+            'SELECT * FROM annotation_status_history WHERE annotation_id = ? AND version <= ? ORDER BY created_at DESC LIMIT 1',
+            [ann.id, version]
+          );
+          if (statusHistory.length > 0) {
+            ann.status = statusHistory[0].new_status;
+          } else if (ann.version_resolved !== null && ann.version_resolved !== undefined) {
+            if (version >= ann.version_resolved) {
+              ann.status = 'resolved';
+            } else {
+              ann.status = 'open';
+            }
+          }
+        } else {
+          replies = await dbAll(
+            'SELECT * FROM annotation_replies WHERE annotation_id = ? ORDER BY created_at ASC',
+            [ann.id]
+          );
+        }
         ann.replies = replies.map(formatReplyRow);
       }
       res.json(annotations);
@@ -213,16 +259,41 @@ function getOperator(req) {
 
   app.get('/api/boards/:boardId/annotations/:annId', async (req, res) => {
     try {
+      const version = req.query.version ? parseInt(req.query.version) : null;
       const row = await dbGet(
         'SELECT * FROM annotations WHERE id = ? AND board_id = ?',
         [req.params.annId, req.params.boardId]
       );
       if (!row) return res.status(404).json({ error: 'Annotation not found' });
+      if (version && row.version_created > version) {
+        return res.status(404).json({ error: 'Annotation not found in this version' });
+      }
       const ann = formatAnnotationRow(row);
-      const replies = await dbAll(
-        'SELECT * FROM annotation_replies WHERE annotation_id = ? ORDER BY created_at ASC',
-        [ann.id]
-      );
+      let replies;
+      if (version) {
+        replies = await dbAll(
+          'SELECT * FROM annotation_replies WHERE annotation_id = ? AND version_created <= ? ORDER BY created_at ASC',
+          [ann.id, version]
+        );
+        const statusHistory = await dbAll(
+          'SELECT * FROM annotation_status_history WHERE annotation_id = ? AND version <= ? ORDER BY created_at DESC LIMIT 1',
+          [ann.id, version]
+        );
+        if (statusHistory.length > 0) {
+          ann.status = statusHistory[0].new_status;
+        } else if (ann.version_resolved !== null && ann.version_resolved !== undefined) {
+          if (version >= ann.version_resolved) {
+            ann.status = 'resolved';
+          } else {
+            ann.status = 'open';
+          }
+        }
+      } else {
+        replies = await dbAll(
+          'SELECT * FROM annotation_replies WHERE annotation_id = ? ORDER BY created_at ASC',
+          [ann.id]
+        );
+      }
       ann.replies = replies.map(formatReplyRow);
       res.json(ann);
     } catch (e) {
@@ -262,15 +333,40 @@ function getOperator(req) {
       if (!existing) return res.status(404).json({ error: 'Annotation not found' });
       const { description, priority, assignee, status } = req.body || {};
       const now = Date.now();
+      const operator = getOperator(req);
       const finalDesc = description !== undefined ? description : existing.description;
       const finalPriority = priority !== undefined ? priority : existing.priority;
       const finalAssignee = assignee !== undefined ? assignee : existing.assignee;
       const finalStatus = status !== undefined ? status : existing.status;
+      const latest = await getLatestVersion(req.params.boardId);
+      const currentVersion = latest ? latest.version : 1;
+
+      let versionResolved = existing.version_resolved;
+      let resolvedAt = existing.resolved_at;
+      let resolvedBy = existing.resolved_by;
+
+      if (status !== undefined && status !== existing.status) {
+        const historyId = uuidv4().replace(/-/g, '').substring(0, 12);
+        await dbRun(
+          'INSERT INTO annotation_status_history (id, annotation_id, old_status, new_status, author, created_at, version) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [historyId, req.params.annId, existing.status, status, operator, now, currentVersion]
+        );
+        if (status === 'resolved') {
+          versionResolved = currentVersion;
+          resolvedAt = now;
+          resolvedBy = operator;
+        } else if (status === 'open') {
+          versionResolved = null;
+          resolvedAt = null;
+          resolvedBy = null;
+        }
+      }
+
       await dbRun(
-        'UPDATE annotations SET description = ?, priority = ?, assignee = ?, status = ?, updated_at = ? WHERE id = ?',
-        [finalDesc, finalPriority, finalAssignee, finalStatus, now, req.params.annId]
+        'UPDATE annotations SET description = ?, priority = ?, assignee = ?, status = ?, updated_at = ?, version_resolved = ?, resolved_at = ?, resolved_by = ? WHERE id = ?',
+        [finalDesc, finalPriority, finalAssignee, finalStatus, now, versionResolved, resolvedAt, resolvedBy, req.params.annId]
       );
-      const ann = formatAnnotationRow({ ...existing, description: finalDesc, priority: finalPriority, assignee: finalAssignee, status: finalStatus, updated_at: now });
+      const ann = formatAnnotationRow({ ...existing, description: finalDesc, priority: finalPriority, assignee: finalAssignee, status: finalStatus, updated_at: now, version_resolved: versionResolved, resolved_at: resolvedAt, resolved_by: resolvedBy });
       const replies = await dbAll('SELECT * FROM annotation_replies WHERE annotation_id = ? ORDER BY created_at ASC', [ann.id]);
       ann.replies = replies.map(formatReplyRow);
       broadcast(req.params.boardId, { type: 'annotationUpdated', payload: ann });
@@ -301,14 +397,16 @@ function getOperator(req) {
       if (!existing) return res.status(404).json({ error: 'Annotation not found' });
       const { content } = req.body || {};
       if (!content || typeof content !== 'string') return res.status(400).json({ error: 'content is required' });
+      const latest = await getLatestVersion(req.params.boardId);
+      const versionCreated = latest ? latest.version : 1;
       const id = uuidv4().replace(/-/g, '').substring(0, 12);
       const now = Date.now();
       const operator = getOperator(req);
       await dbRun(
-        'INSERT INTO annotation_replies (id, annotation_id, content, author, created_at) VALUES (?, ?, ?, ?, ?)',
-        [id, req.params.annId, content, operator, now]
+        'INSERT INTO annotation_replies (id, annotation_id, content, author, created_at, version_created) VALUES (?, ?, ?, ?, ?, ?)',
+        [id, req.params.annId, content, operator, now, versionCreated]
       );
-      const reply = { id, annotation_id: req.params.annId, content, author: operator, created_at: now };
+      const reply = { id, annotation_id: req.params.annId, content, author: operator, created_at: now, version_created: versionCreated };
       await dbRun('UPDATE annotations SET updated_at = ? WHERE id = ?', [now, req.params.annId]);
       broadcast(req.params.boardId, { type: 'annotationReplyAdded', payload: { annotation_id: req.params.annId, reply } });
       res.status(201).json(reply);
@@ -338,7 +436,10 @@ function getOperator(req) {
       created_by: row.created_by,
       created_at: row.created_at,
       updated_at: row.updated_at,
-      version_created: row.version_created
+      version_created: row.version_created,
+      version_resolved: row.version_resolved,
+      resolved_at: row.resolved_at,
+      resolved_by: row.resolved_by
     };
   }
 
@@ -348,7 +449,8 @@ function getOperator(req) {
       annotation_id: row.annotation_id,
       content: row.content,
       author: row.author,
-      created_at: row.created_at
+      created_at: row.created_at,
+      version_created: row.version_created
     };
   }
 

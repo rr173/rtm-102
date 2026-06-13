@@ -333,6 +333,22 @@ const Annotation = (function() {
         }
     }
 
+    async function fetchAll() {
+        const boardId = Collaboration.getBoardId();
+        if (!boardId) return [];
+        try {
+            const res = await fetch(`/api/boards/${boardId}/annotations`);
+            if (!res.ok) return [];
+            const data = await res.json();
+            annotations = data || [];
+            emit('loaded', { annotations });
+            return annotations;
+        } catch (e) {
+            console.error('Failed to fetch annotations:', e);
+            return [];
+        }
+    }
+
     function setAnnotationsList(list) {
         annotations = list || [];
         emit('loaded', { annotations });
@@ -371,6 +387,7 @@ const Annotation = (function() {
         reopenAnnotation,
         handleRemoteMessage,
         fetchForVersion,
+        fetchAll,
         setAnnotationsList,
         getOpenCount,
         getStats
