@@ -2,6 +2,9 @@ const Annotation = (function() {
     let annotations = [];
     let listeners = [];
     let currentFilter = { status: 'all', priority: 'all', assignee: 'all' };
+    let isLoading = false;
+    let hasLoaded = false;
+    let lastLoadHash = '';
 
     function on(cb) {
         listeners.push(cb);
@@ -11,6 +14,17 @@ const Annotation = (function() {
         };
     }
 
+    function hashAnnotations(list) {
+        if (!list || list.length === 0) return 'empty';
+        const key = list.map(a => `${a.id}:${a.updated_at}:${a.replies ? a.replies.length : 0}`).join('|');
+        let h = 0;
+        for (let i = 0; i < key.length; i++) {
+            h = ((h << 5) - h) + key.charCodeAt(i);
+            h |= 0;
+        }
+        return h.toString(36);
+    }
+
     function emit(event, data) {
         for (const l of listeners) {
             try { l(event, data); } catch (e) { console.error(e); }
@@ -18,7 +32,15 @@ const Annotation = (function() {
     }
 
     function loadFromServer(data) {
-        annotations = data.annotations || [];
+        const newAnnotations = data.annotations || [];
+        const newHash = hashAnnotations(newAnnotations);
+        if (newHash === lastLoadHash && hasLoaded) {
+            return;
+        }
+        annotations = newAnnotations;
+        lastLoadHash = newHash;
+        hasLoaded = true;
+        isLoading = false;
         emit('loaded', { annotations });
     }
 
@@ -277,12 +299,14 @@ const Annotation = (function() {
     }
 
     function handleRemoteMessage(msg) {
+        let modified = false;
         switch (msg.type) {
             case 'annotationCreated': {
                 const ann = msg.payload;
                 const exists = annotations.some(a => a.id === ann.id);
                 if (!exists) {
                     annotations.push(ann);
+                    modified = true;
                     emit('remoteCreated', { annotation: ann });
                 }
                 break;
@@ -295,12 +319,17 @@ const Annotation = (function() {
                 } else {
                     annotations.push(ann);
                 }
+                modified = true;
                 emit('remoteUpdated', { annotation: ann });
                 break;
             }
             case 'annotationDeleted': {
                 const id = msg.payload.id;
+                const beforeLen = annotations.length;
                 annotations = annotations.filter(a => a.id !== id);
+                if (annotations.length !== beforeLen) {
+                    modified = true;
+                }
                 emit('remoteDeleted', { id });
                 break;
             }
@@ -312,11 +341,16 @@ const Annotation = (function() {
                     if (!exists) {
                         ann.replies.push(reply);
                         ann.updated_at = Date.now();
+                        modified = true;
                     }
                 }
                 emit('remoteReplyAdded', { annotation_id, reply });
                 break;
             }
+        }
+        if (modified) {
+            lastLoadHash = hashAnnotations(annotations);
+            hasLoaded = true;
         }
     }
 
@@ -333,25 +367,49 @@ const Annotation = (function() {
         }
     }
 
-    async function fetchAll() {
+    async function fetchAll(force) {
         const boardId = Collaboration.getBoardId();
         if (!boardId) return [];
+        if (!force && isLoading) {
+            return annotations;
+        }
+        isLoading = true;
         try {
             const res = await fetch(`/api/boards/${boardId}/annotations`);
-            if (!res.ok) return [];
+            if (!res.ok) {
+                isLoading = false;
+                return [];
+            }
             const data = await res.json();
+            const newHash = hashAnnotations(data);
+            if (!force && newHash === lastLoadHash && hasLoaded) {
+                isLoading = false;
+                return annotations;
+            }
             annotations = data || [];
+            lastLoadHash = newHash;
+            hasLoaded = true;
+            isLoading = false;
             emit('loaded', { annotations });
             return annotations;
         } catch (e) {
+            isLoading = false;
             console.error('Failed to fetch annotations:', e);
             return [];
         }
     }
 
-    function setAnnotationsList(list) {
+    function setAnnotationsList(list, updateHash) {
         annotations = list || [];
+        if (updateHash) {
+            lastLoadHash = hashAnnotations(annotations);
+            hasLoaded = true;
+        }
         emit('loaded', { annotations });
+    }
+
+    function isLoaded() {
+        return hasLoaded;
     }
 
     function getOpenCount() {
@@ -389,6 +447,7 @@ const Annotation = (function() {
         fetchForVersion,
         fetchAll,
         setAnnotationsList,
+        isLoaded,
         getOpenCount,
         getStats
     };

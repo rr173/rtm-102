@@ -52,8 +52,16 @@ const Collaboration = (function() {
         const url = getWsUrl() + `?board_id=${encodeURIComponent(id)}`;
         ws = new WebSocket(url);
 
-        ws.onopen = () => {
+        ws.onopen = async () => {
             emit('connected', { boardId: id });
+            if (typeof Annotation !== 'undefined') {
+                try {
+                    await Annotation.fetchAll();
+                    emit('annotationsLoaded');
+                } catch (e) {
+                    console.error('Failed to load annotations on connect:', e);
+                }
+            }
         };
 
         ws.onclose = (e) => {

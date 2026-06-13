@@ -1029,13 +1029,7 @@ wss.on('connection', async (ws, req) => {
   ws.boardId = boardId;
   ws.operator = wsOperator;
 
-  try {
-    const latest = await getLatestVersion(boardId);
-    if (latest) {
-      ws.send(JSON.stringify({ type: 'fullState', payload: { version: latest.version, state: latest.state } }));
-    }
-    ws.send(JSON.stringify({ type: 'onlineCount', payload: { count: boardClients[boardId].length } }));
-    broadcastOnlineCount(boardId);
+  (async () => {
     try {
       const annRows = await dbAll('SELECT * FROM annotations WHERE board_id = ? ORDER BY created_at DESC', [boardId]);
       const annotations = annRows.map(formatAnnotationRow);
@@ -1047,6 +1041,15 @@ wss.on('connection', async (ws, req) => {
     } catch (e2) {
       console.error('Failed to send annotations init:', e2);
     }
+  })();
+
+  try {
+    const latest = await getLatestVersion(boardId);
+    if (latest) {
+      ws.send(JSON.stringify({ type: 'fullState', payload: { version: latest.version, state: latest.state } }));
+    }
+    ws.send(JSON.stringify({ type: 'onlineCount', payload: { count: boardClients[boardId].length } }));
+    broadcastOnlineCount(boardId);
   } catch (e) {
     console.error(e);
   }

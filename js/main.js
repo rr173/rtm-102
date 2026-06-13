@@ -45,18 +45,23 @@
         Collaboration.on('stateLoaded', async (data) => {
             document.getElementById('version-label').textContent = 'v' + data.version;
             afterStateInit();
-            if (typeof Annotation !== 'undefined') {
+            if (typeof Annotation !== 'undefined' && !Annotation.isLoaded()) {
                 try {
                     await Annotation.fetchAll();
-                    Interaction.updateAnnotationStatusBar();
-                    const panel = document.getElementById('annotation-panel');
-                    if (panel && panel.classList.contains('open')) {
-                        Interaction.renderAnnotationPanel();
-                    }
-                    Render.render();
+                    refreshAnnotationUI();
                 } catch (e) {
-                    console.error('Failed to load annotations on init:', e);
+                    console.error('Failed to load annotations on stateLoaded:', e);
                 }
+            }
+        });
+
+        Collaboration.on('annotationsLoaded', () => {
+            refreshAnnotationUI();
+        });
+
+        Annotation.on((event, data) => {
+            if (event === 'loaded') {
+                refreshAnnotationUI();
             }
         });
 
@@ -694,6 +699,19 @@
         const div = document.createElement('div');
         div.textContent = s;
         return div.innerHTML;
+    }
+
+    function refreshAnnotationUI() {
+        try {
+            Interaction.updateAnnotationStatusBar();
+            const panel = document.getElementById('annotation-panel');
+            if (panel && panel.classList.contains('open')) {
+                Interaction.renderAnnotationPanel();
+            }
+            Render.render();
+        } catch (e) {
+            console.error('Failed to refresh annotation UI:', e);
+        }
     }
 
     let annotationEventsInitialized = false;
